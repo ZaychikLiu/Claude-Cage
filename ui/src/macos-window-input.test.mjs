@@ -230,3 +230,21 @@ test("passive hover tolerates geometry updates and benign window_changed without
     assert.deepEqual(errors, ["missing permission"]);
   } finally { input.dispose(); }
 });
+
+test("passive hover deduplicates unchanged quantized coordinates until cursor moves or button clicks", async () => {
+  const f = fixture();
+  try {
+    f.pointer("pointermove", { buttons: 0, clientX: 120, clientY: 105 });
+    f.pointer("pointermove", { buttons: 0, clientX: 120.001, clientY: 105.001 });
+    await f.input.run(() => {});
+    assert.equal(f.calls.length, 1);
+    f.pointer("pointermove", { buttons: 0, clientX: 140, clientY: 105 });
+    await f.input.run(() => {});
+    assert.equal(f.calls.length, 2);
+    f.pointer("pointerdown", { button: 0, buttons: 1, clientX: 140, clientY: 105 });
+    f.pointer("pointerup", { button: 0, buttons: 0, clientX: 140, clientY: 105 });
+    f.pointer("pointermove", { buttons: 0, clientX: 140, clientY: 105 });
+    await f.input.run(() => {});
+    assert.equal(f.calls.length, 5);
+  } finally { f.input.dispose(); }
+});

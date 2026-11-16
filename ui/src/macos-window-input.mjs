@@ -9,7 +9,7 @@ const modifiers = keys => ({
 });
 
 export function createMacWindowInput({ element, frame, active, request, onError, eventWindow = window }) {
-  let keyboard, disposed = false, queued, pending = 0, move, wheel, drag, lastClick;
+  let keyboard, disposed = false, queued, pending = 0, move, wheel, drag, lastClick, lastHover = "";
   const keys = new Set(), listeners = [];
   const run = action => {
     if (disposed) return Promise.reject(new Error("窗口输入连接已关闭"));
@@ -60,7 +60,7 @@ export function createMacWindowInput({ element, frame, active, request, onError,
   on(element, "pointerdown", event => {
     if (!active() || !frame() || ![0, 1, 2].includes(event.button)) return;
     if (drag && drag.pointer !== event.pointerId) return;
-    event.preventDefault(); focus(); move = undefined;
+    event.preventDefault(); focus(); move = undefined; lastHover = "";
     const now = event.timeStamp;
     const nearby = lastClick && lastClick.button === event.button && now - lastClick.time < 500 &&
       Math.abs(lastClick.x - event.clientX) < 4 && Math.abs(lastClick.y - event.clientY) < 4;
@@ -78,6 +78,13 @@ export function createMacWindowInput({ element, frame, active, request, onError,
     const target = drag?.target || { ...frame() };
     const fields = { phase: "move", buttons: event.buttons, ...point(event),
       shift: event.shiftKey, control: event.ctrlKey, alt: event.altKey, command: event.metaKey };
+    if (hover) {
+      const hoverKey = `${identity(target)}:${Math.round(fields.x * 10000)}:${Math.round(fields.y * 10000)}:${fields.shift ? 1 : 0}${fields.control ? 1 : 0}${fields.alt ? 1 : 0}${fields.command ? 1 : 0}`;
+      if (!move && hoverKey === lastHover) return;
+      lastHover = hoverKey;
+    } else {
+      lastHover = "";
+    }
     if (move) {
       move.fields = fields;
       move.hover = Boolean(move.hover && hover);
@@ -114,7 +121,7 @@ export function createMacWindowInput({ element, frame, active, request, onError,
   });
   const reset = () => {
     if (disposed) return;
-    move = undefined; wheel = undefined; keys.clear();
+    move = undefined; wheel = undefined; lastHover = ""; keys.clear();
     const hadInput = Boolean(drag || keyboard);
     const pointer = drag?.pointer;
     drag = undefined;
