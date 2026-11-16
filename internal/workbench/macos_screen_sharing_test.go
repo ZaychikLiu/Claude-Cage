@@ -400,6 +400,17 @@ func writeScreenSharingSSHConfig(t *testing.T, s *Server, port int) {
 // Run the real OpenSSH client against an isolated server. Accept only the
 // ordinary user and SSH forwarding channels aimed at guest loopback:5900.
 func startScreenSharingGuest(t *testing.T, s *Server) (*atomic.Int32, func()) {
+	return startScreenSharingGuestHandler(t, s, func(channel ssh.Channel) {
+		fmt.Fprint(channel, "RFB 003.889\n")
+		var reply [12]byte
+		if _, err := io.ReadFull(channel, reply[:]); err == nil && string(reply[:]) == "RFB 003.008\n" {
+			_, _ = channel.Write([]byte{1, 30})
+		}
+		channel.Close()
+	})
+}
+
+func startScreenSharingGuestHandler(t *testing.T, s *Server, handle func(ssh.Channel)) (*atomic.Int32, func()) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("macOS guest tunnels use the host's Unix OpenSSH client")
@@ -464,12 +475,7 @@ func startScreenSharingGuest(t *testing.T, s *Server) (*atomic.Int32, func()) {
 						return
 					}
 					go ssh.DiscardRequests(requests)
-					fmt.Fprint(channel, "RFB 003.889\n")
-					var reply [12]byte
-					if _, err = io.ReadFull(channel, reply[:]); err == nil && string(reply[:]) == "RFB 003.008\n" {
-						_, _ = channel.Write([]byte{1, 30})
-					}
-					channel.Close()
+					handle(channel)
 				}
 			}()
 		}
@@ -482,4 +488,107 @@ func startScreenSharingGuest(t *testing.T, s *Server) (*atomic.Int32, func()) {
 	}
 	t.Cleanup(shutdown)
 	return &connections, shutdown
+}
+
+func TestOpenMacOSScreenSharingRecoversHungDaemonAndStalledReuse(t *testing.T) {
+	origReuse := screenSharingReuseProbeTimeout
+	origBind := screenSharingTunnelBindTimeout
+	origProbe := screenSharingRFBProbeTimeout
+	screenSharingReuseProbeTimeout = 150 * time.Millisecond
+	screenSharingTunnelBindTimeout = 3 * time.Second
+	screenSharingRFBProbeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() {
+		screenSharingReuseProbeTimeout = origReuse
+		screenSharingTunnelBindTimeout = origBind
+		screenSharingRFBProbeTimeout = origProbe
+	})
+
+	s := testServer(t)
+	s.macosGuest = &guestos.MacOSProfile{Instance: "mac", User: "blue"}
+	s.ready = true
+
+	// Simulate an existing alive forward whose upstream hangs without answering RFB.
+	hungLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hungLn.Close()
+	go func() {
+		for {
+			conn, err := hungLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				time.Sleep(time.Second)
+			}(conn)
+		}
+	}()
+	oldDone := make(chan struct{})
+	s.screenSharing = macOSScreenSharing{
+		done:   oldDone,
+		cancel: func() { close(oldDone) },
+		port:   hungLn.Addr().(*net.TCPAddr).Port,
+		open:   func(string) error { return nil },
+	}
+
+	var mode atomic.Int32 // 0=hung, 1=ok, 2=eof
+	startScreenSharingGuestHandler(t, s, func(channel ssh.Channel) {
+		switch mode.Load() {
+		case 0:
+			go func() {
+				time.Sleep(time.Second)
+				channel.Close()
+			}()
+		case 1:
+			fmt.Fprint(channel, "RFB 003.889\n")
+			var reply [12]byte
+			if _, err := io.ReadFull(channel, reply[:]); err == nil && string(reply[:]) == "RFB 003.008\n" {
+				_, _ = channel.Write([]byte{1, 30})
+			}
+			channel.Close()
+		default:
+			channel.Close()
+		}
+	})
+
+	var kickstarts atomic.Int32
+	s.screenSharing.kickstart = func(context.Context) error {
+		kickstarts.Add(1)
+		mode.Store(1)
+		return nil
+	}
+
+	w := screenSharingRequest(s, true, `{"action":"open"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected recovery after hung reuse + RFB timeout: %d %s", w.Code, w.Body.String())
+	}
+	if kickstarts.Load() != 1 {
+		t.Fatalf("expected 1 kickstart recovery, got %d", kickstarts.Load())
+	}
+	s.closeMacOSScreenSharing()
+
+	// If RFB keeps hanging even after kickstart, surface errScreenSharingTimedOut
+	// rather than claiming System Settings has Screen Sharing disabled.
+	mode.Store(0)
+	s.screenSharing.kickstart = func(context.Context) error {
+		kickstarts.Add(1)
+		return nil
+	}
+	w = screenSharingRequest(s, true, `{"action":"open"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errScreenSharingTimedOut.Error()) {
+		t.Fatalf("expected timeout error when RFB remains hung: %d %s", w.Code, w.Body.String())
+	}
+
+	// Immediate EOF / refusal must return errScreenSharingUnreachable without kickstart.
+	before := kickstarts.Load()
+	mode.Store(2)
+	w = screenSharingRequest(s, true, `{"action":"open"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errScreenSharingUnreachable.Error()) {
+		t.Fatalf("expected unreachable error on immediate EOF: %d %s", w.Code, w.Body.String())
+	}
+	if kickstarts.Load() != before {
+		t.Fatalf("kickstart must not run on non-timeout RFB failure: got %d", kickstarts.Load()-before)
+	}
 }
