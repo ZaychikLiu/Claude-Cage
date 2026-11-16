@@ -15,12 +15,14 @@ import (
 )
 
 type passwordProbe struct {
-	command *exec.Cmd
-	input   io.WriteCloser
-	output  io.ReadCloser
-	scanner *bufio.Scanner
-	cancel  context.CancelFunc
-	user    string
+	command      *exec.Cmd
+	input        io.WriteCloser
+	output       io.ReadCloser
+	scanner      *bufio.Scanner
+	cancel       context.CancelFunc
+	user         string
+	fallback     func() (*passwordProbe, error)
+	usedFallback bool
 }
 
 func (s *loginSession) openPasswordProbe() (*passwordProbe, error) {
@@ -61,10 +63,31 @@ func (s *loginSession) openPasswordProbe() (*passwordProbe, error) {
 }
 
 func (probe *passwordProbe) close() {
-	probe.input.Close()
-	probe.output.Close()
-	probe.cancel()
-	_ = probe.command.Wait()
+	if probe.input != nil {
+		probe.input.Close()
+	}
+	if probe.output != nil {
+		probe.output.Close()
+	}
+	if probe.cancel != nil {
+		probe.cancel()
+	}
+	if probe.command != nil {
+		_ = probe.command.Wait()
+	}
+}
+
+func (probe *passwordProbe) swap(next *passwordProbe) {
+	probe.close()
+	probe.command = next.command
+	probe.input = next.input
+	probe.output = next.output
+	probe.scanner = next.scanner
+	probe.cancel = next.cancel
+	if next.user != "" {
+		probe.user = next.user
+	}
+	probe.usedFallback = true
 }
 
 func (probe *passwordProbe) target() (passwordTarget, error) {
@@ -76,6 +99,13 @@ func (probe *passwordProbe) target() (passwordTarget, error) {
 		return target, errors.New("无法确认系统授权窗口，请重新打开授权画面")
 	}
 	if json.Unmarshal(probe.scanner.Bytes(), &target) != nil || !target.valid(probe.user) {
+		if probe.fallback != nil && !probe.usedFallback && target.Error == "setup_password_window_obscured" {
+			next, err := probe.fallback()
+			if err == nil {
+				probe.swap(next)
+				return probe.target()
+			}
+		}
 		return target, errors.New("请打开 Apple 系统授权窗口，再选中需要填写的密码框")
 	}
 	return target, nil
