@@ -50,11 +50,6 @@ func (s *Server) macOSProjectApproval(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if !s.op.TryLock() {
-		http.Error(w, "正在处理其他客机操作，请重试", http.StatusConflict)
-		return
-	}
-	defer s.op.Unlock()
 	if req.Action == "cancel" {
 		if !s.cancelMacOSProjectApproval(req.Workspace, req.Grant) {
 			w.Header().Set("X-Cage-Recovery", "project-approval-ended")
@@ -64,6 +59,11 @@ func (s *Server) macOSProjectApproval(w http.ResponseWriter, r *http.Request) {
 		jsonReply(w, map[string]bool{"ok": true})
 		return
 	}
+	if !s.op.TryLock() {
+		http.Error(w, "正在处理其他客机操作，请重试", http.StatusConflict)
+		return
+	}
+	defer s.op.Unlock()
 	s.mu.Lock()
 	share := s.projectShares[req.Workspace]
 	active := s.macosGuest != nil && s.ready && !s.closing && share != nil && equalSecret(share.approval, req.Grant)
