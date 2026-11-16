@@ -31,13 +31,18 @@ func TestMaintenanceWindowRequiresBoundIdentityAndVisibleRegion(t *testing.T) {
 		func(w *maintenanceWindow) { w.Rect[2] = 80_000 },
 		func(w *maintenanceWindow) { w.Rect[3] = math.NaN() },
 		func(w *maintenanceWindow) { w.Display[2] = math.Inf(1) },
-		func(w *maintenanceWindow) { w.Display[3] = 1080 },
+		func(w *maintenanceWindow) { w.Display[3] = 108 },
 	} {
 		invalid := valid
 		change(&invalid)
 		if invalid.valid("trial") {
 			t.Fatalf("accepted unverified maintenance target: %+v", invalid)
 		}
+	}
+	widescreen := valid
+	widescreen.Display = [4]float64{0, 0, 1920, 1080}
+	if !widescreen.valid("trial") {
+		t.Fatal("16:9 host-matched display geometry was rejected")
 	}
 	if !valid.contains(160, 80) || !valid.contains(799, 559) || valid.contains(159, 80) || valid.contains(800, 559) || valid.contains(160, 560) {
 		t.Fatal("maintenance input escaped the shown crop")

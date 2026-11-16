@@ -6,9 +6,9 @@
 
 static VZVirtualMachine *machine;
 static CageGuestSetupView *loginView;
-// Match the virtual Mac's scanout. The input protocol retains its original
-// 16:10 coordinate system, regardless of host window size or display scaling.
-static const CGFloat scanWidth = 1920, scanHeight = 1200;
+// Match the virtual Mac's scanout while retaining the normalized 1024 x 640
+// control coordinate space.
+static CGFloat scanWidth = 1920, scanHeight = 1200;
 
 void cageLoginLoop(void *ref) {
     @autoreleasepool {
@@ -29,8 +29,18 @@ void cageLoginStop(void) {
 void cageLoginEnable(bool enabled) {
     dispatch_sync(dispatch_get_main_queue(), ^{
         [loginView close]; loginView = nil;
-        if (enabled && machine) loginView = [[CageGuestSetupView alloc] initWithMachine:machine size:NSMakeSize(scanWidth,scanHeight)
-            setupAuthorized:^BOOL { return machine != nil; }];
+        if (enabled && machine) {
+            if (machine.graphicsDevices.count > 0 && machine.graphicsDevices.firstObject.displays.count > 0) {
+                CGSize px = machine.graphicsDevices.firstObject.displays.firstObject.sizeInPixels;
+                if (px.width >= 1600 && px.height >= 900) {
+                    CGFloat scale = (px.width >= 2560 && px.height >= 1440) ? 2.0 : 1.0;
+                    scanWidth = px.width / scale;
+                    scanHeight = px.height / scale;
+                }
+            }
+            loginView = [[CageGuestSetupView alloc] initWithMachine:machine size:NSMakeSize(scanWidth, scanHeight)
+                setupAuthorized:^BOOL { return machine != nil; }];
+        }
     });
 }
 void *cageLoginImage(int *size) {

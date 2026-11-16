@@ -5,11 +5,30 @@
 
 package vz
 
+/*
+#cgo darwin LDFLAGS: -framework CoreGraphics -framework CoreFoundation
+#include <CoreGraphics/CoreGraphics.h>
+
+static void cageHostDisplayMetrics(int64_t *pw, int64_t *ph, int64_t *lw, int64_t *lh) {
+	*pw = 0; *ph = 0; *lw = 0; *lh = 0;
+	CGDirectDisplayID id = CGMainDisplayID();
+	if (id == kCGNullDirectDisplay) return;
+	CGDisplayModeRef mode = CGDisplayCopyDisplayMode(id);
+	if (!mode) return;
+	*pw = (int64_t)CGDisplayModeGetPixelWidth(mode);
+	*ph = (int64_t)CGDisplayModeGetPixelHeight(mode);
+	*lw = (int64_t)CGDisplayModeGetWidth(mode);
+	*lh = (int64_t)CGDisplayModeGetHeight(mode);
+	CGDisplayModeRelease(mode);
+}
+*/
+import "C"
 import (
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -111,6 +130,51 @@ func newMacPlatformConfiguration(inst *limatype.Instance) (vz.PlatformConfigurat
 		return nil, err
 	}
 	return platformConfig, nil
+}
+
+func chooseMacOffscreenDisplay(pw, ph, lw, lh int64) (int64, int64, int64) {
+	const (
+		defaultWidth  int64 = 3840
+		defaultHeight int64 = 2400
+		retinaPPI     int64 = 220
+		minWidth      int64 = 2560
+		maxWidth      int64 = 3840
+		maxHeight     int64 = 2560
+	)
+	if pw <= 0 || ph <= 0 || lw <= 0 || lh <= 0 {
+		return defaultWidth, defaultHeight, retinaPPI
+	}
+	ratio := float64(lw) / float64(lh)
+	if ratio < 1.2 || ratio > 2.6 {
+		return defaultWidth, defaultHeight, retinaPPI
+	}
+	w := lw * 2
+	if pw > w && pw <= maxWidth && ph <= maxHeight {
+		w = pw
+	}
+	if w < minWidth {
+		w = minWidth
+	}
+	if w > maxWidth {
+		w = maxWidth
+	}
+	h := int64(math.Round(float64(w) / ratio))
+	if h > maxHeight {
+		h = maxHeight
+		w = int64(math.Round(float64(h) * ratio))
+	}
+	w &^= 1
+	h &^= 1
+	if w < 1600 || h < 900 {
+		return defaultWidth, defaultHeight, retinaPPI
+	}
+	return w, h, retinaPPI
+}
+
+func preferredMacOffscreenDisplay() (int64, int64, int64) {
+	var pw, ph, lw, lh C.int64_t
+	C.cageHostDisplayMetrics(&pw, &ph, &lw, &lh)
+	return chooseMacOffscreenDisplay(int64(pw), int64(ph), int64(lw), int64(lh))
 }
 
 func newMacGraphicsDeviceConfiguration(x, y, pixelsPerInch int64) (vz.GraphicsDeviceConfiguration, error) {
