@@ -7,10 +7,16 @@ import "./device-checks.css";
 const labels = { passed: "通过", failed: "未通过", unknown: "未观测", warning: "需关注", observed: "已观测" };
 const renderers = { software: "软件渲染", "virtual-gpu": "虚拟 GPU", "driver-reported": "驱动报告的渲染器", unobserved: "未观测" };
 
-export function DeviceChecks({ target, disabled = false }) {
+export function DeviceChecks({ target, disabled = false, supported = true }) {
   const [report, setReport] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  if (!supported) {
+    return <section className="device-checks" aria-label="设备配置与渲染检测">
+      <h4>设备配置与渲染检测</h4>
+      <p>当前仅 Linux 客机支持本地配置与渲染检测，macOS / Windows 客机尚未接入。</p>
+    </section>;
+  }
   async function run(selected) {
     setBusy(true); setError(""); setReport(null);
     try { setReport(await api("/environment/device-check", { target: selected })); }

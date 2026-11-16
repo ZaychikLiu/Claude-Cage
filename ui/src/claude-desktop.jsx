@@ -69,7 +69,7 @@ export function DesktopToolbar({ desktop, platform, title = "Claude Desktop", zo
         </span>
         <span className="desktop-toolbar-spacer" />
         {children}
-        <DeviceCheckButton target="desktop" disabled={busy || !desktop?.running} />
+        {platform === "Linux" && <DeviceCheckButton target="desktop" disabled={busy || !desktop?.running} />}
         {desktop?.running && (
           <label className="desktop-display-size">
             显示大小

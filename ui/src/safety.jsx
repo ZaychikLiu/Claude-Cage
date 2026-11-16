@@ -233,7 +233,7 @@ export function SafetyPanel({
             检查涵盖出站规则、代理故障关闭、DNS、共享目录、宿主管理接口，以及系统和浏览器的实际配置。关键项失败或未知时保持外网关闭。
           </p>
         )}
-        <DeviceChecks disabled={busy || !status.vm_running} />
+        <DeviceChecks disabled={busy || !status.vm_running} supported={!status.guest_system || status.guest_system === "linux"} />
         {report?.checks?.some((check) => !check.critical) && (
           <div className="safety-advisories">
             {report.checks
