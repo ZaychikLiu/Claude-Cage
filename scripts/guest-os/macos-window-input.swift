@@ -12,7 +12,7 @@ struct MacInputWindow {
 
 @MainActor
 func checkedMacInputWindow(_ input: Request, window: SCWindow) throws -> MacInputWindow {
-    guard AXIsProcessTrusted() else { throw Failure(9, "accessibility_permission") }
+    guard AccessibilityTrust.shared.current else { throw Failure(9, "accessibility_permission") }
     guard let pid = window.owningApplication?.processID, input.pid == pid, input.window == window.windowID,
           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { throw Failure(7, "window_changed") }
     let app = AXUIElementCreateApplication(pid)

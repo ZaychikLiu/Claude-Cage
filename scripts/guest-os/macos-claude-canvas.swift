@@ -44,7 +44,7 @@ private func liveBounds(_ id: CGWindowID, _ pid: pid_t) throws -> CGRect {
 
 // AXIsProcessTrusted asks tccd, which re-validates this helper's signature.
 // Input and layout ask on every event; a one-second answer is current enough.
-private final class AccessibilityTrust: @unchecked Sendable {
+final class AccessibilityTrust: @unchecked Sendable {
     static let shared = AccessibilityTrust()
     private let lock = NSLock()
     private var checked = Date.distantPast, trusted = false
@@ -111,12 +111,14 @@ private func windowEdgeColor(_ image: CGImage) -> CGColor? {
 // main actor, which also delivers input to the same window. The window is
 // sent as JPEG: it encodes and decodes several times faster than PNG and is
 // the same kind of image a Linux guest sends, at that display's quality.
-private func encodedWindowFrame(_ content: CGImage, phoneJPEG: Bool) throws -> (data: Data, mime: String) {
+private func encodedWindowFrame(_ content: CGImage, phoneJPEG: Bool, motionBurst: Bool = false) throws -> (data: Data, mime: String) {
     if phoneJPEG { return (try phoneDesktopJPEG(content), "image/jpeg") }
     let edge = windowEdgeColor(content)
     var data = Data()
-    // Preserve native glyph density and geometry even on photo-heavy windows.
-    for quality in [0.92, 0.84] {
+    // Lower JPEG quality slightly during high-resolution motion bursts, then send
+    // a full-quality frame once pixels settle so idle text remains crisp.
+    let qualities: [Double] = motionBurst && content.width * content.height > 900_000 ? [0.80, 0.72] : [0.92, 0.84]
+    for quality in qualities {
         var properties: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
         if let edge { properties[kCGImageDestinationBackgroundColor] = edge }
         data = try encodedImage(content, type: .jpeg, properties: properties as CFDictionary)
@@ -148,6 +150,8 @@ final class ClaudeCanvasSession {
 
     private var last: ClaudeCanvas?
     private var token = ""
+    private var lastEncodedAt: TimeInterval = 0
+    private var lastSettled = true
 
     // Finding the window (ScreenCaptureKit enumeration) and laying it out
     // (Accessibility queries) dominate a frame on a virtual Mac. While the
@@ -260,19 +264,27 @@ final class ClaudeCanvasSession {
         // Timings let the host separate waiting for a new frame, encoding
         // in the guest and the transport. They contain no window content.
         let captureStarted = Date()
-        let (updated, sequence) = try await stream.frame(filter: filter, configuration: config, identity: geometry, after: after, wait: wait)
+        let needSettle = !lastSettled && !phoneJPEG
+        let (updated, sequence) = try await stream.frame(filter: filter, configuration: config, identity: geometry, after: after, wait: wait, waitSeconds: needSettle ? 0.25 : 2, forceSettled: needSettle)
         let captureMs = Date().timeIntervalSince(captureStarted) * 1000
         guard try liveBounds(layout.id, layout.pid) == layout.frame,
               try owns(layout.pid) else { throw Failure(7, "window_changed") }
-        guard let image = updated else { return ["unchanged": true, "sequence": sequence, "geometry": geometry] }
+        guard let image = updated else {
+            lastSettled = true
+            return ["unchanged": true, "sequence": sequence, "geometry": geometry]
+        }
         let top = Int((layout.cropTop * CGFloat(image.height) / layout.frame.height).rounded())
         guard top >= 0, top < image.height,
               let content = image.cropping(to: CGRect(x:0,y:top,width:image.width,height:image.height-top)) else {
             throw Failure(7, "window_changed")
         }
+        let now = ProcessInfo.processInfo.systemUptime
+        let motionBurst = !phoneJPEG && layout.scale > 1 && lastEncodedAt > 0 && now - lastEncodedAt < 0.18
+        lastEncodedAt = now
+        lastSettled = !motionBurst
         let encodeStarted = Date()
         let encoded = try await Task.detached(priority: .userInitiated) {
-            try encodedWindowFrame(content, phoneJPEG: phoneJPEG)
+            try encodedWindowFrame(content, phoneJPEG: phoneJPEG, motionBurst: motionBurst)
         }.value
         let data = encoded.data, mime = encoded.mime
         // The second ownership check covers the time spent encoding.

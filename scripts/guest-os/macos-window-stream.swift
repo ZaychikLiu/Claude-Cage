@@ -93,7 +93,7 @@ final class MacWindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
-    func frame(filter: SCContentFilter, configuration: SCStreamConfiguration, identity: String, after: String?, wait: Bool = false) async throws -> (CGImage?, String) {
+    func frame(filter: SCContentFilter, configuration: SCStreamConfiguration, identity: String, after: String?, wait: Bool = false, waitSeconds: Double = 2, forceSettled: Bool = false) async throws -> (CGImage?, String) {
         expiry?.cancel()
         defer { renew() }
         if stream == nil || key != identity {
@@ -118,12 +118,12 @@ final class MacWindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
         if wait, buffer != nil, after == sequence {
             // Revalidate window ownership and the console session at least every
             // two seconds even when ScreenCaptureKit reports no changed pixels.
-            try await waitForFrame(after: sequence, seconds: 2)
+            try await waitForFrame(after: sequence, seconds: waitSeconds)
         }
         guard key == identity else { throw Failure(7, "window_changed") }
         guard let buffer else { await stop(); throw Failure(8, "capture_no_frame") }
         let sequence = self.sequence
-        if sequence == after { return (nil, sequence) }
+        if sequence == after && !forceSettled { return (nil, sequence) }
         let image = CIImage(cvPixelBuffer: buffer)
         // Reading the surface back copies the whole frame. It runs off the main
         // actor so that input and other requests are not held behind it.
