@@ -428,15 +428,31 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       if (historyFrame) {
         historyFrame = false;
         replayingHistory = true;
-        terminal.write(new Uint8Array(event.data), () => { replayingHistory = false; });
+        // History includes old device/color queries. Answering them again can
+        // overflow the remote PTY input queue and close the new connection.
+        terminal.options.disableStdin = true;
+        terminal.write(new Uint8Array(event.data), () => {
+          replayingHistory = false;
+          if (!disposed) terminal.options.disableStdin = false;
+        });
       } else terminal.write(new Uint8Array(event.data));
     };
-    ws.onclose = () => { setConnected(false); reveal(); };
+    ws.onclose = () => { if (!disposed) { setConnected(false); reveal(); } };
+    let inputTimer = null, pendingInput = [];
     const send = (data) => {
       if (disposed || ws.readyState !== WebSocket.OPEN) throw new Error("终端已断开，请重新连接后重试");
-      ws.send(JSON.stringify({ type: "input", data }));
+      pendingInput.push(data);
+      if (inputTimer === null) inputTimer = setTimeout(() => {
+        inputTimer = null;
+        const batch = pendingInput.join("");
+        pendingInput = [];
+        if (!disposed && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "input", data: batch }));
+        }
+      }, 0);
     };
     terminal.onData((data) => {
+      if (disposed || replayingHistory) return;
       if (emittingPaste) send(data);
       else void enqueue(() => send(data)).catch(() => {});
     });
@@ -582,6 +598,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     resize();
     return () => {
       disposed = true;
+      clearTimeout(inputTimer);
+      pendingInput = [];
       clearTimeout(startupTimer);
       revealStartup.current = null;
       startupRender.dispose();
