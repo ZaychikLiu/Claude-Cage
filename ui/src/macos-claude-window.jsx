@@ -105,6 +105,10 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
   const launched = useRef(false);
 
   useEffect(() => {
+    if (!screenVisible) launched.current = false;
+  }, [screenVisible, base]);
+
+  useEffect(() => {
     if (!screenVisible) return;
     if (browser) launched.current = false;
     const epoch = ++generation.current;
@@ -113,7 +117,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
     const live = () => generation.current === epoch;
     function receiveFrame(next) {
       if (!live()) return;
-      if (frame.current?.window !== next.window || frame.current?.pid !== next.pid || frame.current?.geometry !== next.geometry) frame.current = null;
+      if (frame.current?.window !== next.window || frame.current?.pid !== next.pid) frame.current = null;
       setImage({
         src: next.src || `data:${next.mime === "image/jpeg" ? "image/jpeg" : "image/png"};base64,${next.image}`,
         window: next.window, pid: next.pid,
@@ -253,7 +257,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
       input.dispose(); transport.dispose();
       if (controls.current?.transport === transport) controls.current = null;
     };
-  }, [screenVisible, state?.input, state?.persistent, inputChannel, image?.geometry, image?.pid, image?.window]);
+  }, [screenVisible, state?.input, state?.persistent, inputChannel, Boolean(image), image?.pid, image?.window]);
 
   function receive(content, lease, prepared) {
     const target = lease?.target || frame.current;
@@ -295,17 +299,21 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
       <MacOSLogin />
       {!browser && <button disabled={!state?.input || !image || transferring} onClick={() => void chooseFiles()}>添加附件</button>}
       {!browser && <input ref={picker} type="file" multiple hidden aria-label="选择 Claude 附件" onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void receive({ files, kind: "paste" }, pickerTarget.current || undefined).catch(fileFailure); }} />}
-      {(!state?.running || error) && <button onClick={() => action("launch")} disabled={!state?.installed}>{state?.running ? "重新连接应用" : "打开应用"}</button>}
+      {(!state?.running || (!image && error)) && <button onClick={() => action("launch")} disabled={!state?.installed}>{state?.running ? "重新连接应用" : "打开应用"}</button>}
       {state?.installed && !state.screen && <button onClick={() => action("request-screen")}>授权窗口画面</button>}
       {state?.installed && !state.input && <button onClick={() => action("request-input")}>授权键鼠</button>}
     </DesktopToolbar>
-    {error && <p role="alert">{error}</p>}
-    {fileError && <p role="alert">{fileError}</p>}
+    {!image && error && <p role="alert">{error}</p>}
+    {!image && fileError && <p role="alert">{fileError}</p>}
     {state && !state.installed && <p>此虚拟 Mac 尚未安装 {appName}。</p>}
     {state?.running && !state.screen && <p>{messages.screen_recording_permission}</p>}
     {state?.running && state.screen && !state.input && <p>{messages.accessibility_permission}</p>}
     <div ref={pane} className="mac-claude-frame" style={{ "--desktop-zoom": zoom }}>
-      {image && <img ref={surface} key={image.geometry || `${image.pid}-${image.window}`} alt={appName + " 客机窗口"} src={image.src} draggable={false}
+      {image && (error || fileError) && <div className="mac-claude-alerts">
+        {error && <p role="alert">{error}</p>}
+        {fileError && <p role="alert">{fileError}</p>}
+      </div>}
+      {image && <img ref={surface} key={`${image.pid}-${image.window}`} alt={appName + " 客机窗口"} src={image.src} draggable={false}
         onLoad={e => {
           const img = e.currentTarget;
           const width = image.width || img.naturalWidth;

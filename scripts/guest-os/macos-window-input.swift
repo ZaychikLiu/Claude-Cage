@@ -29,7 +29,7 @@ func checkedMacInputWindow(_ input: Request, window: SCWindow) throws -> MacInpu
           AXValueGetValue(position as! AXValue, .cgPoint, &origin), AXValueGetValue(size as! AXValue, .cgSize, &extent) else {
         throw Failure(7, "window_changed")
     }
-    let tolerance: CGFloat = input.action == "project-click" ? 24 : 1
+    let tolerance: CGFloat = input.action == "project-click" ? 24 : 2
     guard abs(origin.x - window.frame.minX) < tolerance, abs(origin.y - window.frame.minY) < tolerance,
           abs(extent.width - window.frame.width) < tolerance, abs(extent.height - window.frame.height) < tolerance else {
         throw Failure(7, "window_changed")
@@ -77,6 +77,8 @@ final class MacWindowInputSession {
     private var focusedTarget = ""
     private var focusContext = ""
     private var composition: (id: String, context: String, sequence: Int, updated: Date)?
+
+    var hasActiveDrag: Bool { !buttons.isEmpty || press != nil }
 
     static func requirePointerOwner(_ session: MacWindowInputSession?) throws {
         if let owner = pointerOwner, owner != session?.id { throw Failure(8, "input_owned_by_another_view") }

@@ -175,3 +175,58 @@ test("native window merges wheel events queued behind a slow scroll and keeps th
     assert.deepEqual(errors, []);
   } finally { input.dispose(); }
 });
+
+test("passive hover tolerates geometry updates and benign window_changed without input-reset or errors", async () => {
+  let current = { pid: 23, window: 70, geometry: "geometry-1" };
+  let mode = "window_changed";
+  const calls = [], errors = [];
+  const element = Object.assign(new EventTarget(), { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) });
+  const input = createMacWindowInput({
+    element, frame: () => current, active: () => true,
+    request: async (action, fields) => {
+      calls.push({ action, ...fields });
+      if (action === "pointer" && mode === "window_changed") {
+        const error = new Error("活动窗口已变化，请在新画面中重试。");
+        error.code = "window_changed";
+        throw error;
+      }
+      if (action === "pointer" && mode === "permission") {
+        const error = new Error("missing permission");
+        error.code = "accessibility_permission";
+        throw error;
+      }
+      return { ok: true };
+    },
+    onError: error => errors.push(error), eventWindow: new EventTarget(),
+  });
+  const hover = (clientX = 40) => element.dispatchEvent(Object.assign(new Event("pointermove", { cancelable: true }), {
+    pointerId: 1, button: 0, buttons: 0, clientX, clientY: 50,
+    shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
+  }));
+  try {
+    let release;
+    const gate = input.run(() => new Promise(resolve => { release = resolve; }));
+    await Promise.resolve();
+    hover(25);
+    current = { pid: 23, window: 70, geometry: "geometry-2" };
+    release();
+    await gate;
+    await input.run(() => {});
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].action, "pointer");
+    assert.equal(calls[0].geometry, "geometry-2");
+    assert.deepEqual(errors, []);
+
+    mode = "ok";
+    hover(60);
+    await input.run(() => {});
+    assert.equal(calls.at(-1).action, "pointer");
+    assert.equal(calls.at(-1).geometry, "geometry-2");
+    assert.deepEqual(errors, []);
+
+    mode = "permission";
+    hover(70);
+    await input.run(() => {}).catch(() => {});
+    assert.deepEqual(errors, ["missing permission"]);
+  } finally { input.dispose(); }
+});

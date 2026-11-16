@@ -428,11 +428,16 @@ private func handle(_ input: Request, inputSession: MacWindowInputSession) async
             try sendInput(text, window: window, canvas: geometry, inputSession: inputSession)
         }
     case "text", "key", "click", "scroll", "pointer":
-        let window: SCWindow
-        if let cached = canvas.cachedWindow() { window = cached } else { window = try await targetWindow().0 }
-        let geometry = try input.geometry.map { try canvas.inputGeometry($0, window:window) }
-        try sendInput(input, window: window, canvas:geometry, inputSession: inputSession)
-        return ["ok": true]
+        let passiveHover = input.action == "pointer" && input.phase == "move" && (input.buttons ?? 0) == 0 && !inputSession.hasActiveDrag
+        do {
+            let window: SCWindow
+            if let cached = canvas.cachedWindow() { window = cached } else { window = try await targetWindow().0 }
+            let geometry = try input.geometry.map { try canvas.inputGeometry($0, window:window) }
+            try sendInput(input, window: window, canvas:geometry, inputSession: inputSession)
+            return ["ok": true]
+        } catch let failure as Failure where passiveHover && ["window_changed", "no_visible_window", "not_running"].contains(failure.message) {
+            return ["ok": true]
+        }
     case "project-frame", "project-click":
         guard let path = input.project else { throw Failure(7, "no_project_panel") }
         let panel = try pendingProjectPanel(path)

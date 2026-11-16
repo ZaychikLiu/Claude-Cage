@@ -1,4 +1,6 @@
 const identity = frame => frame && `${frame.pid}:${frame.window}:${frame.geometry || ""}`;
+const benignHoverError = error =>
+  error?.code === "window_changed" || error?.code === "no_visible_window" || error?.code === "not_running";
 const modifiers = keys => ({
   shift: keys.has("ShiftLeft") || keys.has("ShiftRight"),
   control: keys.has("ControlLeft") || keys.has("ControlRight"),
@@ -72,16 +74,30 @@ export function createMacWindowInput({ element, frame, active, request, onError,
   });
   on(element, "pointermove", event => {
     if (!active() || !frame() || (drag && drag.pointer !== event.pointerId)) return;
+    const hover = !drag && !event.buttons;
     const target = drag?.target || { ...frame() };
     const fields = { phase: "move", buttons: event.buttons, ...point(event),
       shift: event.shiftKey, control: event.ctrlKey, alt: event.altKey, command: event.metaKey };
-    if (move) { move.fields = fields; return; }
-    const entry = { fields };
+    if (move) {
+      move.fields = fields;
+      move.hover = Boolean(move.hover && hover);
+      if (!move.hover) move.target = target;
+      return;
+    }
+    const entry = { fields, hover, target };
     move = entry;
     report(run(() => {
       if (move === entry) move = undefined;
-      if (!valid(target)) throw new Error("输入窗口已变化，请重新操作");
-      return request("pointer", { ...target, ...entry.fields });
+      if (entry.hover) {
+        if (!active() || !frame()) return;
+        const current = { ...frame() };
+        return request("pointer", { ...current, ...entry.fields }).catch(error => {
+          if (benignHoverError(error)) return;
+          throw error;
+        });
+      }
+      if (!valid(entry.target)) throw new Error("输入窗口已变化，请重新操作");
+      return request("pointer", { ...entry.target, ...entry.fields });
     }));
   });
   on(element, "pointerup", event => {
