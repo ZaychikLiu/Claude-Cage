@@ -153,6 +153,19 @@ func TestMacOSProjectApprovalIsBoundToOnePendingShare(t *testing.T) {
 	if call(folder, grant) != 200 || s.projectShares[folder] != nil || call(folder, grant) != http.StatusConflict {
 		t.Fatal("a canceled project grant can still be reused")
 	}
+
+	// Cancel must not fail with 409 busy when s.op is held by an in-flight frame poll.
+	held := &projectShare{}
+	s.projectShares[folder] = held
+	s.beginMacOSProjectApproval(folder, held)
+	s.op.Lock()
+	defer s.op.Unlock()
+	if code := call(folder, held.approval); code != http.StatusOK {
+		t.Fatalf("cancel while op held returned %d, want 200", code)
+	}
+	if s.projectShares[folder] != nil {
+		t.Fatal("pending share remained after cancel")
+	}
 }
 
 func TestInitialMacSetupQuarantinesRegularWorkbench(t *testing.T) {

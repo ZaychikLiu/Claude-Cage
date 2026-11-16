@@ -61,6 +61,7 @@ export function MacOSProjectApproval({ pending, onCheck, onClose, onSettings }) 
   const [ended, setEnded] = useState(false);
   const [maintenance, setMaintenance] = useState("");
   const active = useRef(false),
+    canceled = useRef(false),
     inFlight = useRef(null);
   const call = (action, fields = {}) =>
     api("/macos/project-approval", {
@@ -73,13 +74,14 @@ export function MacOSProjectApproval({ pending, onCheck, onClose, onSettings }) 
   useEffect(() => {
     let live = true,
       timer;
+    canceled.current = false;
     async function poll() {
-      if (!active.current) {
+      if (!active.current && !canceled.current) {
         try {
           const request = call("frame");
           inFlight.current = request;
           const result = await request;
-          if (live && !active.current) {
+          if (live && !active.current && !canceled.current) {
             if (result.error === "project_screen_permission") setMaintenance("screen");
             if (result.error === "accessibility_permission") setMaintenance("input");
             const valid = Boolean(
@@ -97,7 +99,7 @@ export function MacOSProjectApproval({ pending, onCheck, onClose, onSettings }) 
             );
           }
         } catch (e) {
-          if (live && !active.current) {
+          if (live && !active.current && !canceled.current) {
             setFrame(null);
             setNotice(e.message);
             if (e.recovery === "project-approval-ended") {
@@ -109,7 +111,7 @@ export function MacOSProjectApproval({ pending, onCheck, onClose, onSettings }) 
           inFlight.current = null;
         }
       }
-      if (live) timer = setTimeout(poll, 650);
+      if (live && !canceled.current) timer = setTimeout(poll, 650);
     }
     setFrame(null);
     setEnded(false);
@@ -140,14 +142,32 @@ export function MacOSProjectApproval({ pending, onCheck, onClose, onSettings }) 
       setBusy(false);
     }
   }
-  const cancel = () =>
-    act(async () => {
-      try {
-        await call("cancel");
-      } catch (error) {
-        if (error.recovery !== "project-approval-ended") throw error;
+  const cancel = async () => {
+    if (canceled.current) return;
+    canceled.current = true;
+    active.current = true;
+    setBusy(true);
+    setActionError("");
+    try {
+      await call("cancel");
+    } catch (error) {
+      if (error.recovery !== "project-approval-ended" && error.status && error.status < 500) {
+        canceled.current = false;
+        active.current = false;
+        setBusy(false);
+        setActionError(error.message);
+        return;
       }
-      onClose();
+    }
+    onClose();
+  };
+  const verify = () =>
+    act(async () => {
+      const wasEnded = ended;
+      await onCheck();
+      if (!wasEnded) {
+        setActionError("尚未检测到客机文件夹授权，请在上方授权窗口中允许后重试。");
+      }
     });
   const click = (event) => {
     if (!frame) return;
@@ -178,7 +198,7 @@ export function MacOSProjectApproval({ pending, onCheck, onClose, onSettings }) 
           <button disabled={busy} onClick={cancel}>
             取消
           </button>
-          <button disabled={busy} onClick={() => act(onCheck)}>
+          <button disabled={busy} onClick={verify}>
             {ended ? "重新请求授权" : "验证授权"}
           </button>
         </>
