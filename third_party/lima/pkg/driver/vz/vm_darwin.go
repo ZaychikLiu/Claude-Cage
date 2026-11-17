@@ -639,8 +639,9 @@ func attachDisplay(inst *limatype.Instance, vmConfig *vz.VirtualMachineConfigura
 			var err error
 			if *inst.Config.Video.Display == "offscreen" {
 				// macOS uses the display's physical density to select Retina backing.
-				// Keep a 1920 x 1200 point workspace for the embedded application.
-				graphicsDeviceConfiguration, err = newMacGraphicsDeviceConfiguration(3840, 2400, 220)
+				// Match the host's main display aspect and Retina density when available.
+				w, h, ppi := preferredMacOffscreenDisplay()
+				graphicsDeviceConfiguration, err = newMacGraphicsDeviceConfiguration(w, h, ppi)
 			} else {
 				graphicsDeviceConfiguration, err = newMacGraphicsDeviceConfiguration(1920, 1200, 80)
 			}

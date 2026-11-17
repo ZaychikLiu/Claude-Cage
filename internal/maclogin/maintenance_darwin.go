@@ -12,37 +12,65 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strings"
 	"time"
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/sylvinus/agent-vm/internal/guestos"
 )
 
-func (s *loginSession) maintenanceCommand(ctx context.Context, operation string) (*exec.Cmd, string, error) {
-	open := operation == "--maintenance-open"
+func (s *loginSession) maintenanceIdentity(open bool) (string, string, error) {
 	if !guestos.ValidMacMaintenancePurpose(s.maintenance) {
-		return nil, "", errors.New("维护用途无效")
+		return "", "", errors.New("维护用途无效")
 	}
 	bound, err := guestos.LoadMacOSProfile(s.profile)
 	if err != nil || bound == nil || bound.SetupID != "" {
-		return nil, "", errors.New("请先完成虚拟 Mac 的首次设置")
+		return "", "", errors.New("请先完成虚拟 Mac 的首次设置")
 	}
 	if open {
 		s.maintenanceMachineID = bound.MachineID
 	} else if s.maintenanceMachineID != bound.MachineID {
-		return nil, "", errors.New("虚拟 Mac 身份已变化，请重新打开维护画面")
+		return "", "", errors.New("虚拟 Mac 身份已变化，请重新打开维护画面")
 	}
 	user, err := guestos.MacOSProvisionUser(s.profile)
 	if err != nil {
-		return nil, "", err
+		return "", "", err
 	}
 	if open {
 		s.maintenanceAdministrator = user
 	} else if s.maintenanceAdministrator != user {
-		return nil, "", errors.New("客机安装身份已变化，请重新打开维护画面")
+		return "", "", errors.New("客机安装身份已变化，请重新打开维护画面")
 	}
-	cmd, err := guestGUIProbeCommand(ctx, s.profile, user, bound.User, operation, s.maintenance)
-	return cmd, bound.User, err
+	return user, bound.User, nil
+}
+
+func (s *loginSession) maintenanceCommand(ctx context.Context, operation string) (*exec.Cmd, string, error) {
+	user, guestUser, err := s.maintenanceIdentity(operation == "--maintenance-open")
+	if err != nil {
+		return nil, "", err
+	}
+	cmd, err := guestGUIProbeCommand(ctx, s.profile, user, guestUser, operation, s.maintenance)
+	return cmd, guestUser, err
+}
+
+func queryCompositorMaintenance(probe *passwordProbe, user string) (maintenanceWindow, bool, error) {
+	var result maintenanceWindow
+	if _, err := io.WriteString(probe.input, "{\"action\":\"probe\"}\n"); err != nil {
+		return result, false, err
+	}
+	if !probe.scanner.Scan() {
+		return result, false, errors.New("compositor probe stream closed")
+	}
+	if err := json.Unmarshal(probe.scanner.Bytes(), &result); err != nil {
+		return result, false, err
+	}
+	if result.Error != "" {
+		return result, true, errors.New(result.probeMessage())
+	}
+	if !result.valid(user) {
+		return result, true, errors.New("客机授权窗口身份无法确认，请重新打开维护画面")
+	}
+	return result, true, nil
 }
 
 func (s *loginSession) maintenanceProbe(open bool) (maintenanceWindow, error) {
@@ -50,6 +78,12 @@ func (s *loginSession) maintenanceProbe(open bool) (maintenanceWindow, error) {
 	operation := "--maintenance-probe"
 	if open {
 		operation = "--maintenance-open"
+	} else if s.maintenanceCompositor != nil {
+		if cached, ok, err := queryCompositorMaintenance(s.maintenanceCompositor, s.maintenanceCompositor.user); ok {
+			return cached, err
+		}
+		s.maintenanceCompositor.close()
+		s.maintenanceCompositor = nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
@@ -80,12 +114,272 @@ func (s *loginSession) maintenanceProbe(open bool) (maintenanceWindow, error) {
 		return result, errors.New("客机维护组件需要更新，请在环境设置中更新组件")
 	}
 	if result.Error != "" {
+		if !open && result.Error == "maintenance_window_obscured" && (result.BlockingBundle == "com.apple.notificationcenterui" || result.BlockingBundle == "com.apple.dock" || result.BlockingBundle == "") {
+			if stream, openErr := s.openCompositorProbe(5*time.Minute, false); openErr == nil {
+				if fallback, ok, fallbackErr := queryCompositorMaintenance(stream, user); ok && fallbackErr == nil {
+					s.maintenanceCompositor = stream
+					return fallback, nil
+				}
+				stream.close()
+			}
+		}
 		return result, errors.New(result.probeMessage())
 	}
 	if !open && !result.valid(user) {
 		return result, errors.New("客机授权窗口身份无法确认，请重新打开维护画面")
 	}
 	return result, nil
+}
+
+const macOSCompositorProbeJXA = `
+ObjC.import("AppKit");
+ObjC.import("ApplicationServices");
+ObjC.import("CoreGraphics");
+ObjC.import("Foundation");
+
+const sigCache = {};
+function codesignOK(pid, bundlePath, bundleID) {
+  if (!bundlePath || !bundleID) return false;
+  const key = pid + ":" + bundleID + ":" + bundlePath;
+  if (key in sigCache) return sigCache[key];
+  const t = $.NSTask.alloc.init;
+  t.executableURL = $.NSURL.fileURLWithPath("/usr/bin/codesign");
+  t.arguments = $(["--verify", "--strict", "-R", ` + "`" + `=anchor apple and identifier "${bundleID}"` + "`" + `, bundlePath]);
+  t.standardOutput = $.NSFileHandle.fileHandleWithNullDevice;
+  t.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+  const ok = Boolean(t.launchAndReturnError(null)) && (t.waitUntilExit, t.terminationStatus === 0);
+  sigCache[key] = ok;
+  return ok;
+}
+
+function activeSession(expectedUser) {
+  const sh = $.NSTask.alloc.init;
+  sh.executableURL = $.NSURL.fileURLWithPath("/bin/sh");
+  sh.arguments = $(["-c", "/usr/sbin/ioreg -a -n Root -r -d 1 | /usr/bin/plutil -convert json -o - -"]);
+  const pipe = $.NSPipe.pipe;
+  sh.standardOutput = pipe;
+  sh.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+  if (!sh.launchAndReturnError(null)) return null;
+  const data = pipe.fileHandleForReading.readDataToEndOfFile;
+  sh.waitUntilExit;
+  if (sh.terminationStatus !== 0) return null;
+  const str = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+  const root = JSON.parse(ObjC.unwrap(str));
+  const users = (Array.isArray(root) ? root[0]?.IOConsoleUsers : root?.IOConsoleUsers) || [];
+  const active = users.filter(u => u.kCGSSessionOnConsoleKey === true);
+  if (active.length !== 1) return null;
+  const cur = active[0];
+  if (cur.kCGSessionLoginDoneKey !== true || cur.CGSSessionScreenIsLocked === true) return null;
+  if (cur.kCGSSessionUserNameKey !== expectedUser) return null;
+  return cur.CGSSessionUniqueSessionUUID || null;
+}
+
+let systemEventsApp = null;
+function passwordFocused(pid, rx, ry, rw, rh) {
+  if (!$.AXIsProcessTrusted()) return false;
+  try {
+    if (!systemEventsApp) systemEventsApp = Application("System Events");
+    const proc = systemEventsApp.processes.whose({ unixId: pid })[0];
+    const f = proc.attributes.byName("AXFocusedUIElement").value();
+    if (!f || f.subrole() !== "AXSecureTextField" || f.attributes.byName("AXEnabled").value() !== true) return false;
+    const fp = f.position(), fs = f.size();
+    if (!fp || !fs || fs[0] <= 0 || fs[1] <= 0) return false;
+    if (fp[0] < rx || fp[1] < ry || fp[0] + fs[0] > rx + rw || fp[1] + fs[1] > ry + rh) return false;
+    const matchesTarget = (el) => {
+      try {
+        const role = el.role();
+        if (role !== "AXSheet" && role !== "AXWindow") return false;
+        const p = el.position(), s = el.size();
+        return Math.abs(p[0] - rx) < 1 && Math.abs(p[1] - ry) < 1 && Math.abs(s[0] - rw) < 1 && Math.abs(s[1] - rh) < 1;
+      } catch (e) { return false; }
+    };
+    try {
+      const win = f.attributes.byName("AXWindow").value();
+      if (win && matchesTarget(win)) return true;
+    } catch (e) {}
+    let cur = f;
+    for (let i = 0; i < 12; i++) {
+      try { cur = cur.attributes.byName("AXParent").value(); } catch (e) { return false; }
+      if (!cur) return false;
+      if (matchesTarget(cur)) return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+function runProbe(passwordMode) {
+  const errPrefix = passwordMode ? "setup_password_" : "maintenance_";
+  const user = ObjC.unwrap($.NSUserName());
+  const session = activeSession(user);
+  if (!session) return { error: "requires_gui_login" };
+  const front = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+  if (front.isNil()) return { error: errPrefix + "foreground_changed" };
+  const frontPID = front.processIdentifier;
+  const frontBundle = ObjC.unwrap(front.bundleIdentifier) || "";
+  const frontPath = front.bundleURL.isNil() ? "" : ObjC.unwrap(front.bundleURL.path);
+  const allowedApps = passwordMode
+    ? ["com.apple.systempreferences", "com.apple.authorizationhost"]
+    : ["com.apple.systempreferences", "com.apple.authorizationhost", "com.apple.UserNotificationCenter"];
+  if (!allowedApps.includes(frontBundle) || !codesignOK(frontPID, frontPath, frontBundle)) {
+    return { error: errPrefix + "foreground_changed", blocking_pid: frontPID, blocking_bundle: frontBundle };
+  }
+  const disp = $.CGDisplayBounds($.CGMainDisplayID());
+  const dx = disp.origin.x, dy = disp.origin.y, dw = disp.size.width, dh = disp.size.height;
+  const arr = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, $.kCGNullWindowID);
+  const count = $.CFArrayGetCount(arr);
+  const windows = [];
+  for (let i = 0; i < count; i++) {
+    const d = ObjC.castRefToObject($.CFArrayGetValueAtIndex(arr, i));
+    const alpha = d.objectForKey("kCGWindowAlpha").isNil() ? 1 : Number(ObjC.unwrap(d.objectForKey("kCGWindowAlpha")));
+    if (alpha <= 0) continue;
+    const b = d.objectForKey("kCGWindowBounds");
+    if (b.isNil()) continue;
+    const bx = Number(ObjC.unwrap(b.objectForKey("X")));
+    const by = Number(ObjC.unwrap(b.objectForKey("Y")));
+    const bw = Number(ObjC.unwrap(b.objectForKey("Width")));
+    const bh = Number(ObjC.unwrap(b.objectForKey("Height")));
+    if (bw <= 0 || bh <= 0) continue;
+    const owner = Number(ObjC.unwrap(d.objectForKey("kCGWindowOwnerPID")));
+    const winID = Number(ObjC.unwrap(d.objectForKey("kCGWindowNumber")));
+    const layer = Number(ObjC.unwrap(d.objectForKey("kCGWindowLayer")));
+    const oApp = $.NSRunningApplication.runningApplicationWithProcessIdentifier(owner);
+    const oBid = oApp.isNil() ? "" : (ObjC.unwrap(oApp.bundleIdentifier) || "");
+    const oPath = oApp.isNil() || oApp.bundleURL.isNil() ? "" : ObjC.unwrap(oApp.bundleURL.path);
+    const fullDisp = bx === dx && by === dy && bw === dw && bh === dh;
+    const isCompositor = layer > 0 && fullDisp && ((oBid === "com.apple.dock" && layer === 20) || (oBid === "com.apple.notificationcenterui" && layer === 23)) && codesignOK(owner, oPath, oBid);
+    const isCursor = !oBid && layer >= 2147483600 && bw <= 64 && bh <= 64;
+    windows.push({ x: bx, y: by, w: bw, h: bh, pid: owner, win: winID, layer, bundle: oBid, path: oPath, systemSurface: isCompositor || isCursor });
+  }
+  if (!passwordMode) {
+    const covering = [];
+    for (const w of windows) {
+      const isTarget = w.pid === frontPID || (w.bundle === "com.apple.UserNotificationCenter" && codesignOK(w.pid, w.path, w.bundle));
+      if (isTarget && w.w >= 100 && w.h >= 60) {
+        const rx = Math.max(w.x, dx), ry = Math.max(w.y, dy);
+        const rw = Math.min(w.x + w.w, dx + dw) - rx;
+        const rh = Math.min(w.y + w.h, dy + dh) - ry;
+        if (rw < 80 || rh < 40) return { error: "maintenance_window_unavailable" };
+        for (const c of covering) {
+          if (c.x < rx + rw && c.x + c.w > rx && c.y < ry + rh && c.y + c.h > ry) {
+            return { error: "maintenance_window_obscured", blocking_pid: c.pid, blocking_window: c.win, blocking_bundle: c.bundle };
+          }
+        }
+        return { version: 1, session, user, pid: w.pid, window: w.win, bundle: w.bundle, password_focused: false, rect: [rx, ry, rw, rh], display: [dx, dy, dw, dh] };
+      }
+      if (w.pid !== frontPID && !w.systemSurface) covering.push(w);
+    }
+    return { error: "maintenance_window_unavailable" };
+  }
+  const idx = windows.findIndex(w => w.pid === frontPID && w.layer === 0 && w.w >= 80 && w.h >= 40);
+  if (idx < 0) return { error: "setup_password_window_unavailable" };
+  const target = windows[idx];
+  const accessibility = Boolean($.AXIsProcessTrusted());
+  if (target.win === 0 || target.x < dx || target.y < dy || target.x + target.w > dx + dw || target.y + target.h > dy + dh) {
+    return { error: "setup_password_window_unavailable" };
+  }
+  if (!accessibility && frontBundle === "com.apple.systempreferences") {
+    const hasParent = windows.slice(idx + 1).some(w =>
+      w.pid === frontPID && w.layer === 0 &&
+      w.x <= target.x && w.y <= target.y && w.x + w.w >= target.x + target.w && w.y + w.h >= target.y + target.h &&
+      w.w > target.w && w.h > target.h && target.w * target.h < w.w * w.h * 0.75
+    );
+    if (!hasParent) return { error: "setup_password_window_unavailable" };
+  }
+  for (let i = 0; i < idx; i++) {
+    const c = windows[i];
+    if (!c.systemSurface && c.x < target.x + target.w && c.x + c.w > target.x && c.y < target.y + target.h && c.y + c.h > target.y) {
+      return { error: "setup_password_window_obscured" };
+    }
+  }
+  const focused = accessibility && passwordFocused(frontPID, target.x, target.y, target.w, target.h);
+  const nowFront = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+  if (nowFront.isNil() || nowFront.processIdentifier !== frontPID || activeSession(user) !== session) {
+    return { error: "setup_password_foreground_changed" };
+  }
+  return {
+    version: 1, session, user, pid: frontPID, window: target.win, bundle: frontBundle,
+    rect: [target.x, target.y, target.w, target.h], display: [dx, dy, dw, dh],
+    accessibility, password_focused: focused, selection_required: !accessibility
+  };
+}
+
+function main(passwordMode) {
+  const stdin = $.NSFileHandle.fileHandleWithStandardInput;
+  const stdout = $.NSFileHandle.fileHandleWithStandardOutput;
+  let buf = "";
+  while (true) {
+    let line = null;
+    while (true) {
+      const nl = buf.indexOf("\n");
+      if (nl >= 0) { line = buf.slice(0, nl); buf = buf.slice(nl + 1); break; }
+      let d;
+      try { d = stdin.availableData; } catch (e) { return; }
+      if (!d || Number(d.length) === 0) {
+        if (buf.length > 0) { line = buf; buf = ""; break; }
+        return;
+      }
+      const chunk = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(d, $.NSUTF8StringEncoding));
+      if (!chunk) return;
+      buf += chunk;
+    }
+    let out = null;
+    try {
+      const req = JSON.parse(line);
+      if (!req || Array.isArray(req) || typeof req !== "object" || (Object.keys(req).length !== 0 && !(Object.keys(req).length === 1 && req.action === "probe"))) {
+        out = { error: "setup_password_probe_request_invalid" };
+      } else {
+        out = runProbe(passwordMode);
+      }
+    } catch (e) {
+      out = { error: "setup_password_probe_request_invalid" };
+    }
+    stdout.writeData($(JSON.stringify(out) + "\n").dataUsingEncoding($.NSUTF8StringEncoding));
+  }
+}
+main(PROBE_PASSWORD_MODE);
+void 0;
+`
+
+func (s *loginSession) openCompositorProbe(timeout time.Duration, passwordMode bool) (*passwordProbe, error) {
+	admin, user, err := s.maintenanceIdentity(false)
+	if err != nil {
+		return nil, err
+	}
+	script := strings.Replace(macOSCompositorProbeJXA, "PROBE_PASSWORD_MODE", func() string {
+		if passwordMode {
+			return "true"
+		}
+		return "false"
+	}(), 1)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	inner := `uid=$(/usr/bin/id -u ` + shellescape.Quote(user) + `)
+test "$(/usr/bin/stat -f %u /dev/console)" = "$uid" || exit 73
+exec /bin/launchctl asuser "$uid" /usr/bin/sudo -Hu ` + shellescape.Quote(user) + ` /usr/bin/env -i HOME=` + shellescape.Quote("/Users/"+user) + ` PATH=/usr/bin:/bin:/usr/sbin /usr/bin/osascript -l JavaScript -e ` + shellescape.Quote(script)
+	command, err := guestAdminRootCommand(ctx, s.profile, admin, inner)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	input, err := command.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	output, err := command.StdoutPipe()
+	if err != nil {
+		input.Close()
+		cancel()
+		return nil, err
+	}
+	if err = command.Start(); err != nil {
+		input.Close()
+		output.Close()
+		cancel()
+		return nil, err
+	}
+	scanner := bufio.NewScanner(output)
+	scanner.Buffer(make([]byte, 4096), 32<<10)
+	return &passwordProbe{command: command, input: input, output: output, scanner: scanner, cancel: cancel, user: user, usedFallback: true}, nil
 }
 
 func maintenanceFailure(surface maintenanceWindow, err error, closed bool) reply {
@@ -204,7 +498,7 @@ func (s *loginSession) handleMaintenance(in request) (result reply) {
 }
 
 func (s *loginSession) openMaintenancePasswordProbe() (*passwordProbe, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	command, user, err := s.maintenanceCommand(ctx, "--maintenance-password-probe")
 	if err != nil {
 		cancel()
@@ -229,7 +523,15 @@ func (s *loginSession) openMaintenancePasswordProbe() (*passwordProbe, error) {
 	}
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 4096), 32<<10)
-	return &passwordProbe{command: command, input: input, output: output, scanner: scanner, cancel: cancel, user: user}, nil
+	return &passwordProbe{
+		command:  command,
+		input:    input,
+		output:   output,
+		scanner:  scanner,
+		cancel:   cancel,
+		user:     user,
+		fallback: func() (*passwordProbe, error) { return s.openCompositorProbe(20*time.Second, true) },
+	}, nil
 }
 
 func (s *loginSession) fillMaintenancePassword(window maintenanceWindow) error {

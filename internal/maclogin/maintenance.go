@@ -81,7 +81,11 @@ func (w maintenanceWindow) validGeometry(user string) bool {
 			return false
 		}
 	}
-	return w.Display[2] > 0 && w.Display[3] > 0 && math.Abs(w.Display[2]/w.Display[3]-1.6) < 0.001 && w.Rect[2] >= 80 && w.Rect[3] >= 40 &&
+	if w.Display[2] < 800 || w.Display[2] > 8192 || w.Display[3] < 600 || w.Display[3] > 8192 {
+		return false
+	}
+	ratio := w.Display[2] / w.Display[3]
+	return ratio >= 1.2 && ratio <= 2.6 && w.Rect[2] >= 80 && w.Rect[3] >= 40 &&
 		w.Rect[0] >= w.Display[0] && w.Rect[1] >= w.Display[1] &&
 		w.Rect[0]+w.Rect[2] <= w.Display[0]+w.Display[2] && w.Rect[1]+w.Rect[3] <= w.Display[1]+w.Display[3]
 }

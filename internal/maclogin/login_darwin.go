@@ -31,6 +31,7 @@ type loginSession struct {
 	maintenanceFrame         string
 	maintenanceMachineID     string
 	maintenanceAdministrator string
+	maintenanceCompositor    *passwordProbe
 	passwordSelection        passwordSelection
 }
 
@@ -90,6 +91,10 @@ uid=$(/usr/bin/id -u ` + shellescape.Quote(bound.User) + `)
 func (s *loginSession) close() {
 	if s.token != "" {
 		s.surface.Enable(false)
+	}
+	if s.maintenanceCompositor != nil {
+		s.maintenanceCompositor.close()
+		s.maintenanceCompositor = nil
 	}
 	s.token = ""
 	s.screenID = ""

@@ -137,6 +137,9 @@ func TestImportCompilesOnlyOwnedNetworkBoundary(t *testing.T) {
 	if config["unified-delay"] != true {
 		t.Fatal("node latency includes connection setup instead of an established-connection request")
 	}
+	if config["tcp-concurrent"] != true || config["keep-alive-idle"] != 15 || config["keep-alive-interval"] != 15 {
+		t.Fatalf("missing kernel tuning options: %v", config)
+	}
 	if s.Sources[0].Nodes[1].Config["dialer-proxy"] != s.Sources[0].Nodes[0].ID {
 		t.Fatal("chain not namespaced")
 	}

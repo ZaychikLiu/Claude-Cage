@@ -248,3 +248,53 @@ test("passive hover deduplicates unchanged quantized coordinates until cursor mo
     assert.equal(f.calls.length, 5);
   } finally { f.input.dispose(); }
 });
+
+test("scroll ignores benign window_changed and pointerdown retries once with latest frame", async () => {
+  let current = { pid: 23, window: 70, geometry: "geometry-1" };
+  let failNextPointer = true;
+  const calls = [], errors = [];
+  const element = Object.assign(new EventTarget(), {
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+    setPointerCapture: () => {},
+    hasPointerCapture: () => false,
+    releasePointerCapture: () => {},
+  });
+  const input = createMacWindowInput({
+    element, frame: () => current, active: () => true,
+    request: async (action, fields) => {
+      calls.push({ action, ...fields });
+      if (action === "scroll") {
+        const err = new Error("活动窗口已变化，请在新画面中重试。");
+        err.code = "window_changed";
+        throw err;
+      }
+      if (action === "pointer" && failNextPointer) {
+        failNextPointer = false;
+        current = { pid: 23, window: 70, geometry: "geometry-2" };
+        const err = new Error("活动窗口已变化，请在新画面中重试。");
+        err.code = "window_changed";
+        throw err;
+      }
+      return { ok: true };
+    },
+    onError: error => errors.push(error), eventWindow: new EventTarget(),
+  });
+  try {
+    element.dispatchEvent(Object.assign(new Event("wheel", { cancelable: true }), { deltaY: 120, deltaX: 0, clientX: 50, clientY: 50 }));
+    await input.run(() => {});
+    assert.deepEqual(errors, []);
+    assert.equal(calls.filter(c => c.action === "input-reset").length, 0);
+
+    element.dispatchEvent(Object.assign(new Event("pointerdown", { cancelable: true }), {
+      pointerId: 1, button: 0, buttons: 1, clientX: 50, clientY: 50,
+      shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
+    }));
+    await input.run(() => {});
+    assert.deepEqual(errors, []);
+    const pointers = calls.filter(c => c.action === "pointer");
+    assert.equal(pointers.length, 2);
+    assert.equal(pointers[0].geometry, "geometry-1");
+    assert.equal(pointers[1].geometry, "geometry-2");
+    assert.equal(calls.filter(c => c.action === "input-reset").length, 0);
+  } finally { input.dispose(); }
+});

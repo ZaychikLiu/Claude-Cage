@@ -305,5 +305,8 @@ func (s Store) Runtime(profile string) ([]byte, error) {
 	// Measure a request on the established connection rather than folding
 	// protocol and TLS setup into the node's displayed HTTP latency.
 	config["unified-delay"] = true
+	config["tcp-concurrent"] = true
+	config["keep-alive-idle"] = 15
+	config["keep-alive-interval"] = 15
 	return yaml.Marshal(config)
 }
