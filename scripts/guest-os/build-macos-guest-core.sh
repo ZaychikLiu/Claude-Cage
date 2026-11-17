@@ -25,6 +25,9 @@ import (
 
 // CageViewObject borrows the VZVirtualMachine for the duration of RunGUI.
 func (v *VirtualMachine) CageViewObject() unsafe.Pointer { return objc.Ptr(v) }
+
+// CageViewQueue borrows the VZVirtualMachine's serial dispatch queue.
+func (v *VirtualMachine) CageViewQueue() unsafe.Pointer { return v.dispatchQueue }
 GO
 cp go.mod "$work/trial.mod"
 cp go.sum "$work/trial.sum"

@@ -22,6 +22,7 @@ import (
 )
 
 type objectReference interface{ CageViewObject() unsafe.Pointer }
+type objectQueue interface{ CageViewQueue() unsafe.Pointer }
 
 func init() {
 	if _, built := any((*apple.VirtualMachine)(nil)).(objectReference); !built {
@@ -93,7 +94,11 @@ func runVZ(ctx context.Context, machine *apple.VirtualMachine, dir string) error
 			}
 		}
 	}()
-	C.cageLoginLoop(ref.CageViewObject())
+	var queue unsafe.Pointer
+	if q, ok := any(machine).(objectQueue); ok {
+		queue = q.CageViewQueue()
+	}
+	C.cageLoginLoop(ref.CageViewObject(), queue)
 	runtime.KeepAlive(machine)
 	cancel()
 	return <-done

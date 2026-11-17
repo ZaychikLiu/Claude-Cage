@@ -1,6 +1,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
-void cageLoginLoop(void *machine);
+void cageLoginLoop(void *machine, void *queue);
 void cageLoginStop(void);
 void cageLoginEnable(bool enabled);
 void *cageLoginImage(int *size);

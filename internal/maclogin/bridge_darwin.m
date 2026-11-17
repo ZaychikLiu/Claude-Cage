@@ -5,18 +5,20 @@
 #import "../../scripts/guest-os/macos-setup-view.m"
 
 static VZVirtualMachine *machine;
+static dispatch_queue_t vmQueue;
 static CageGuestSetupView *loginView;
 // Match the virtual Mac's scanout while retaining the normalized 1024 x 640
 // control coordinate space.
 static CGFloat scanWidth = 1920, scanHeight = 1200;
 
-void cageLoginLoop(void *ref) {
+void cageLoginLoop(void *ref, void *queue) {
     @autoreleasepool {
         machine = (__bridge VZVirtualMachine *)ref;
+        vmQueue = (__bridge dispatch_queue_t)queue;
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyProhibited];
         [app run];
-        [loginView close]; loginView = nil; machine = nil;
+        [loginView close]; loginView = nil; vmQueue = nil; machine = nil;
     }
 }
 void cageLoginStop(void) {
@@ -27,16 +29,28 @@ void cageLoginStop(void) {
     });
 }
 void cageLoginEnable(bool enabled) {
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        [loginView close]; loginView = nil;
-        if (enabled && machine) {
+    __block CGFloat nextWidth = 1920, nextHeight = 1200;
+    __block BOOL hasMetrics = NO;
+    // VZVirtualMachine and its graphics devices assert access on the VM's serial queue.
+    if (enabled && machine && vmQueue) {
+        dispatch_sync(vmQueue, ^{
             if (machine.graphicsDevices.count > 0 && machine.graphicsDevices.firstObject.displays.count > 0) {
                 CGSize px = machine.graphicsDevices.firstObject.displays.firstObject.sizeInPixels;
                 if (px.width >= 1600 && px.height >= 900) {
                     CGFloat scale = (px.width >= 2560 && px.height >= 1440) ? 2.0 : 1.0;
-                    scanWidth = px.width / scale;
-                    scanHeight = px.height / scale;
+                    nextWidth = px.width / scale;
+                    nextHeight = px.height / scale;
+                    hasMetrics = YES;
                 }
+            }
+        });
+    }
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        [loginView close]; loginView = nil;
+        if (enabled && machine) {
+            if (hasMetrics) {
+                scanWidth = nextWidth;
+                scanHeight = nextHeight;
             }
             loginView = [[CageGuestSetupView alloc] initWithMachine:machine size:NSMakeSize(scanWidth, scanHeight)
                 setupAuthorized:^BOOL { return machine != nil; }];
