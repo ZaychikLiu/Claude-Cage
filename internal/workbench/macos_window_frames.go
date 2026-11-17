@@ -180,7 +180,7 @@ func relayMacOSFrames(parent context.Context, ws *websocket.Conn, input io.Write
 		return
 	case <-changed:
 	}
-	reader := bufio.NewReaderSize(output, 64<<10)
+	reader := bufio.NewReaderSize(output, 512<<10)
 	var revision uint64
 	after := ""
 	for ctx.Err() == nil {

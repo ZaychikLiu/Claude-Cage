@@ -21,6 +21,10 @@ func newMacPlatformConfiguration(_ *limatype.Instance) (vz.PlatformConfiguration
 	return nil, errMacOSGuestUnsupported
 }
 
+func preferredMacOffscreenDisplay() (int64, int64, int64) {
+	return 3840, 2400, 220
+}
+
 func newMacGraphicsDeviceConfiguration(_, _, _ int64) (vz.GraphicsDeviceConfiguration, error) {
 	return nil, errMacOSGuestUnsupported
 }

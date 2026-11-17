@@ -38,6 +38,27 @@ func TestOffscreenGuestDisplay(t *testing.T) {
 	assert.ErrorContains(t, driver.RunGUI(t.Context()), "RunGUI is not supported")
 }
 
+func TestChooseMacOffscreenDisplay(t *testing.T) {
+	cases := []struct {
+		name               string
+		pw, ph, lw, lh     int64
+		wantW, wantH, want int64
+	}{
+		{"4k_16_9", 3840, 2160, 1920, 1080, 3840, 2160, 220},
+		{"5k_scaled_1440", 5120, 2880, 2560, 1440, 3840, 2160, 220},
+		{"mbp_14", 3024, 1964, 1512, 982, 3024, 1964, 220},
+		{"headless_fallback", 0, 0, 0, 0, 3840, 2400, 220},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, h, ppi := chooseMacOffscreenDisplay(tc.pw, tc.ph, tc.lw, tc.lh)
+			assert.Equal(t, w, tc.wantW)
+			assert.Equal(t, h, tc.wantH)
+			assert.Equal(t, ppi, tc.want)
+		})
+	}
+}
+
 func TestWaitForStopped(t *testing.T) {
 	t.Run("returns nil after the VM has stopped", func(t *testing.T) {
 		l := &LimaVzDriver{machine: &virtualMachineWrapper{}}

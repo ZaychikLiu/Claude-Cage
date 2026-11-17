@@ -69,6 +69,17 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
   const frameConnection = useRef(null);
   const request = (action, fields) => windowRequest(base, action, fields, connection.current);
   const [zoom, setZoom] = useDesktopZoom();
+  const [smoothMode, setSmoothMode] = useState(() => {
+    try { return localStorage.getItem("cage-macos-smooth-mode") === "true"; }
+    catch { return false; }
+  });
+  const toggleSmoothMode = () => {
+    setSmoothMode(prev => {
+      const next = !prev;
+      try { localStorage.setItem("cage-macos-smooth-mode", String(next)); } catch {}
+      return next;
+    });
+  };
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
   const [fileError, setFileError] = useState("");
@@ -91,6 +102,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
       viewport.current = width > 0 && height > 0 ? {
         width: Math.min(2560, Math.max(320, Math.round(width / zoom))),
         height: Math.min(1600, Math.max(240, Math.round(height / zoom))),
+        ...(smoothMode ? { scale: 1 } : {}),
       } : null;
       frameConnection.current?.resize(viewport.current);
     };
@@ -98,7 +110,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => { observer.disconnect(); viewport.current = null; };
-  }, [visible, zoom]);
+  }, [visible, zoom, smoothMode]);
   const picker = useRef(null);
   const pickerTarget = useRef(null);
   const generation = useRef(0);
@@ -113,7 +125,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
     if (browser) launched.current = false;
     const epoch = ++generation.current;
     let timer;
-    let current, nextStatus = 0, after = "", captureSize = "", checkFrame = true;
+    let current, nextStatus = 0, after = "", captureSize = "", checkFrame = true, autoRelaunched = false;
     const live = () => generation.current === epoch;
     function receiveFrame(next) {
       if (!live()) return;
@@ -158,6 +170,12 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
                 frameConnection.current = null;
                 nextStatus = 0;
                 frame.current = null;
+                if (reason === "window_changed") return;
+                if (reason === "no_visible_window" && !autoRelaunched) {
+                  autoRelaunched = true;
+                  launched.current = false;
+                  return;
+                }
                 setImage(null);
                 setError(messages[reason] || "未能读取虚拟 Mac 的窗口画面，请重新连接。");
               }, base);
@@ -297,6 +315,9 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
       onStop={browser ? undefined : () => action("stop")} refresh={() => refresh(n => n+1)} sidebarCollapsed={sidebarCollapsed} onExpand={onExpand}>
       {browser && <BrowserFavorites ready={Boolean(state?.installed)} onOpen={onOpenPage} />}
       <MacOSLogin />
+      <button onClick={toggleSmoothMode} title={smoothMode ? "当前为流畅模式 (1x)，点击切换为高清 (Retina)" : "当前为高清模式 (Retina)，点击切换为流畅模式 (1x，帧率更高)"}>
+        {smoothMode ? "流畅 1x" : "高清 Retina"}
+      </button>
       {!browser && <button disabled={!state?.input || !image || transferring} onClick={() => void chooseFiles()}>添加附件</button>}
       {!browser && <input ref={picker} type="file" multiple hidden aria-label="选择 Claude 附件" onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void receive({ files, kind: "paste" }, pickerTarget.current || undefined).catch(fileFailure); }} />}
       {(!state?.running || (!image && error)) && <button onClick={() => action("launch")} disabled={!state?.installed}>{state?.running ? "重新连接应用" : "打开应用"}</button>}
@@ -308,7 +329,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
     {state && !state.installed && <p>此虚拟 Mac 尚未安装 {appName}。</p>}
     {state?.running && !state.screen && <p>{messages.screen_recording_permission}</p>}
     {state?.running && state.screen && !state.input && <p>{messages.accessibility_permission}</p>}
-    <div ref={pane} className="mac-claude-frame" style={{ "--desktop-zoom": zoom }}>
+    <div ref={pane} className="mac-claude-frame" style={{ "--desktop-zoom": zoom }} onPointerDown={e => { if (e.target === pane.current) controls.current?.transport.focus(); }}>
       {image && (error || fileError) && <div className="mac-claude-alerts">
         {error && <p role="alert">{error}</p>}
         {fileError && <p role="alert">{fileError}</p>}

@@ -50,7 +50,11 @@ export function createMacFrameConnection(onFrame, onError, base = "/macos/claude
   return {
     resize(viewport) {
       if (closed || !viewport) return;
-      const next = { ...viewport, scale: Math.max(1, Math.min(2, window.devicePixelRatio || 1)) };
+      const requestedScale = Number(viewport.scale);
+      const scale = Number.isFinite(requestedScale) && requestedScale >= 1 && requestedScale <= 2
+        ? requestedScale
+        : Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const next = { width: viewport.width, height: viewport.height, scale };
       const key = JSON.stringify(next);
       if (key === size) return;
       size = key;

@@ -1,7 +1,7 @@
 // Focus and the caret nearly always move because of the viewer's own input.
 // Read them quickly while the viewer acts, and rarely once they stop: every
 // reading is a round trip into the guest, and on Linux also a probe key.
-export const caretPollFast = 250;
+export const caretPollFast = 450;
 export const caretPollSlow = 2000;
 
 export function caretPollDelay(quiet) {

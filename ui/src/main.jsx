@@ -118,6 +118,7 @@ function App() {
     [fatal, setFatal] = useState(""),
     [connectionError, setConnectionError] = useState(""),
     [browserError, setBrowserError] = useState(""),
+    browserErrorRef = useRef(""),
     [dialog, setDialog] = useState(null),
     [transfer, setTransfer] = useState(null),
     [details, setDetails] = useState(false),
@@ -725,14 +726,15 @@ function App() {
         }
         if (next.ready) {
           const supportsBrowser = guestCapability(next, "browser");
-          const fetchBrowser = supportsBrowser && !next.environment_update_required && (!browserStreamReady.current || !initialized.current);
-          if (!supportsBrowser) setBrowserError("");
+          const fetchBrowser = supportsBrowser && !next.environment_update_required && (Boolean(browserErrorRef.current) || !browserStreamReady.current || !initialized.current);
+          if (!supportsBrowser) { browserErrorRef.current = ""; setBrowserError(""); }
           const [browserResult, t] = await Promise.all([
             fetchBrowser ? api("/browser/tabs").then(result => {
-              if (live) setBrowserError("");
+              if (live) { browserErrorRef.current = ""; setBrowserError(""); }
               return result;
             }).catch(error => {
-              if (live) setBrowserError(next.guest_system === "macos" ? "请在环境设置中同步 macOS 组件，并确认已登录客机图形账户。" : error.message);
+              const msg = next.guest_system === "macos" ? "请在环境设置中同步 macOS 组件，并确认已登录客机图形账户。" : error.message;
+              if (live) { browserErrorRef.current = msg; setBrowserError(msg); }
               return null;
             }) : null,
             api("/terminals"),

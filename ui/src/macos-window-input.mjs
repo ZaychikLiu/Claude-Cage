@@ -9,7 +9,7 @@ const modifiers = keys => ({
 });
 
 export function createMacWindowInput({ element, frame, active, request, onError, eventWindow = window }) {
-  let keyboard, disposed = false, queued, pending = 0, move, wheel, drag, lastClick, lastHover = "";
+  let keyboard, disposed = false, queued, pending = 0, move, wheel, drag, lastClick, lastHover = "", hoverEpoch = 0;
   const keys = new Set(), listeners = [];
   const run = action => {
     if (disposed) return Promise.reject(new Error("窗口输入连接已关闭"));
@@ -33,10 +33,21 @@ export function createMacWindowInput({ element, frame, active, request, onError,
     return result;
   };
   const valid = target => !disposed && active() && identity(target) === identity(frame());
-  const send = (action, fields, target = frame()) => run(() => {
+  const sendWithRetry = async (action, fields, target) => {
     if (!target || !valid(target)) throw new Error("输入窗口已变化，请重新操作");
-    return request(action, { ...target, ...fields });
-  });
+    try {
+      return await request(action, { ...target, ...fields });
+    } catch (error) {
+      if (error?.code !== "window_changed") throw error;
+      await new Promise(resolve => setTimeout(resolve, 15));
+      if (disposed || !active() || !frame()) throw error;
+      return request(action, { ...frame(), ...fields });
+    }
+  };
+  const send = (action, fields, target = frame()) => {
+    hoverEpoch++;
+    return run(() => sendWithRetry(action, fields, target));
+  };
   const report = promise => { void promise.catch(error => { if (!disposed) onError(error.message); }); };
   const on = (target, name, callback, options) => {
     target.addEventListener(name, callback, options);
@@ -51,11 +62,10 @@ export function createMacWindowInput({ element, frame, active, request, onError,
   };
   const focus = () => keyboard?.focus({ preventScroll: true });
   const key = (symbol, code, down, target) => {
-    if (!target || !valid(target)) throw new Error("输入窗口已变化，请重新操作");
     if (down) keys.add(code); else keys.delete(code);
     const character = symbol >= 0x01000000 ? symbol & 0x00ffffff : symbol;
     const name = character >= 32 && character < 0xff00 ? String.fromCodePoint(character) : code;
-    return request("key", { ...target, code, key: name, down, ...modifiers(keys) });
+    return sendWithRetry("key", { code, key: name, down, ...modifiers(keys) }, target);
   };
   on(element, "pointerdown", event => {
     if (!active() || !frame() || ![0, 1, 2].includes(event.button)) return;
@@ -79,7 +89,7 @@ export function createMacWindowInput({ element, frame, active, request, onError,
     const fields = { phase: "move", buttons: event.buttons, ...point(event),
       shift: event.shiftKey, control: event.ctrlKey, alt: event.altKey, command: event.metaKey };
     if (hover) {
-      const hoverKey = `${identity(target)}:${Math.round(fields.x * 10000)}:${Math.round(fields.y * 10000)}:${fields.shift ? 1 : 0}${fields.control ? 1 : 0}${fields.alt ? 1 : 0}${fields.command ? 1 : 0}`;
+      const hoverKey = `${identity(target)}:${Math.round(fields.x * 500)}:${Math.round(fields.y * 500)}:${fields.shift ? 1 : 0}${fields.control ? 1 : 0}${fields.alt ? 1 : 0}${fields.command ? 1 : 0}`;
       if (!move && hoverKey === lastHover) return;
       lastHover = hoverKey;
     } else {
@@ -91,20 +101,19 @@ export function createMacWindowInput({ element, frame, active, request, onError,
       if (!move.hover) move.target = target;
       return;
     }
-    const entry = { fields, hover, target };
+    const entry = { fields, hover, target, epoch: hoverEpoch };
     move = entry;
     report(run(() => {
       if (move === entry) move = undefined;
       if (entry.hover) {
-        if (!active() || !frame()) return;
+        if (entry.epoch !== hoverEpoch || !active() || !frame()) return;
         const current = { ...frame() };
         return request("pointer", { ...current, ...entry.fields }).catch(error => {
           if (benignHoverError(error)) return;
           throw error;
         });
       }
-      if (!valid(entry.target)) throw new Error("输入窗口已变化，请重新操作");
-      return request("pointer", { ...entry.target, ...entry.fields });
+      return sendWithRetry("pointer", entry.fields, entry.target);
     }));
   });
   on(element, "pointerup", event => {
@@ -144,16 +153,21 @@ export function createMacWindowInput({ element, frame, active, request, onError,
     wheel = entry;
     report(run(() => {
       if (wheel === entry) wheel = undefined;
-      if (!valid(entry.target)) throw new Error("输入窗口已变化，请重新操作");
+      if (!active() || !frame()) return;
+      const current = { ...frame() };
       const delta = clamp(entry.deltaY), deltaX = clamp(entry.deltaX);
       // A merged gesture beyond one request's limit continues in the next one.
-      if (entry.deltaY !== delta || entry.deltaX !== deltaX) scroll(entry.target, entry.at, entry.deltaY - delta, entry.deltaX - deltaX);
-      return request("scroll", { ...entry.target, ...entry.at, delta, deltaX });
+      if (entry.deltaY !== delta || entry.deltaX !== deltaX) scroll(current, entry.at, entry.deltaY - delta, entry.deltaX - deltaX);
+      return request("scroll", { ...current, ...entry.at, delta, deltaX }).catch(error => {
+        if (benignHoverError(error)) return;
+        throw error;
+      });
     }));
   };
   on(element, "wheel", event => {
     if (!active() || !frame()) return;
     event.preventDefault();
+    hoverEpoch++;
     scroll({ ...frame() }, point(event), event.deltaY, event.deltaX);
   }, { passive: false });
   on(eventWindow, "blur", reset);
