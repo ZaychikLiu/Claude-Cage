@@ -24,7 +24,9 @@ export function EnvironmentVersions({ status, onConfirm }) {
     if (!(await onConfirm({
       title: tools ? "更新环境工具？" : "更新环境组件？",
       body: data?.maintenance?.native
-        ? "请先保存内容并结束正在运行的终端和 Claude Code 轮次。更新会重启浏览器、编辑器和文件共享连接，聊天历史、项目文件与登录资料会保留。" + (data.maintenance.guest_system === "windows-11" ? "请在系统提示中确认主机管理授权，并验证已绑定客机的管理员账户。" : "")
+        ? (tools
+          ? "更新环境工具会重新准备并升级浏览器、编辑器、Claude Code 等软件，同时同步 Cage 客机组件。请先保存内容并结束正在运行的终端和 Claude Code 轮次；聊天历史、项目文件与登录资料会保留。"
+          : "更新环境组件只同步 Cage 自带客机助手程序（窗口、剪贴板、文件共享等），不重装浏览器与开发工具。请先保存内容并结束正在运行的终端和 Claude Code 轮次；聊天历史、项目文件与登录资料会保留。") + (data.maintenance.guest_system === "windows-11" ? "请在系统提示中确认主机管理授权，并验证已绑定客机的管理员账户。" : "")
         : "请先保存浏览器和编辑器中的内容。浏览器、编辑器会短暂重启，编辑器内的终端可能结束；工作台终端、项目文件和登录状态会保留。",
       confirm: tools ? "更新工具" : "更新组件",
     }))) return;
@@ -40,6 +42,7 @@ export function EnvironmentVersions({ status, onConfirm }) {
       <h4>版本与组件</h4>
       <div className="setting-summary-row"><span>控制服务</span><strong>{data?.controller?.version || "—"}</strong></div>
       <div className="setting-summary-row"><span>环境组件</span><strong>{componentLabels[data?.components?.status] || (loading ? "正在读取…" : "暂时无法确认")}</strong></div>
+      <p className="field-help">环境组件指 Cage 自带的客机底层服务与助手程序（窗口、剪贴板、文件共享、网络代理等），负责与当前宿主机 Cage 保持兼容；下表所列则为预装在客机中的第三方应用与开发工具。</p>
       {data?.tools && <table className="environment-tool-table">
         <thead><tr><th>工具</th><th>当前版本</th><th>受管版本</th></tr></thead>
         <tbody>{Object.entries(toolNames).filter(([key]) => data.tools[key]).map(([key, name]) => <tr key={key}><td>{name}</td><td>{data.tools[key]?.current || "—"}</td><td>{data.tools[key]?.required || "—"}</td></tr>)}</tbody>
@@ -51,8 +54,8 @@ export function EnvironmentVersions({ status, onConfirm }) {
         <button disabled={busy || !data?.tools_update_allowed} onClick={() => update(true)}>更新环境工具</button>
       </div>
       <p className="field-help">{data?.maintenance?.native
-        ? "原生组件更新前需结束运行中的终端与 Claude Code 轮次。系统磁盘、项目和账户资料保留，已暂停的外网继续保持暂停。工具包由主机准备并校验后传入客机。"
-        : "组件更新保留虚拟磁盘与终端。工具更新需先启动环境并同步组件，依赖通过已选代理下载；无需放行业务网络，也不会自动恢复已暂停的外网。"}</p>
+        ? "「更新环境组件」仅同步主机安装包内的 Cage 客机组件，不重装上表软件，速度更快；「更新环境工具」会另外准备并升级上表工具包（同时也会同步环境组件）。更新前需结束运行中的终端与 Claude Code 轮次，系统磁盘、项目和账户资料保留，已暂停的外网继续保持暂停。"
+        : "「更新环境组件」同步 Cage 客机底层服务与协议；「更新环境工具」升级上表中的浏览器、编辑器与开发工具。组件更新保留虚拟磁盘与终端；工具更新需先启动环境并同步组件，依赖通过已选代理下载，无需放行业务网络也不会自动恢复已暂停的外网。"}</p>
     </section>
   );
 }
