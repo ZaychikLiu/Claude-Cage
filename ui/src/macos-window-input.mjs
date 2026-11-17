@@ -1,4 +1,17 @@
 const identity = frame => frame && `${frame.pid}:${frame.window}:${frame.geometry || ""}`;
+// The input channel caps a text insert at 8 KB of UTF-8; longer pastes are
+// split on code point boundaries and delivered in order.
+const textParts = text => {
+  const encoder = new TextEncoder(), parts = [];
+  let buffer = "", bytes = 0;
+  for (const character of text) {
+    const size = encoder.encode(character).length;
+    if (buffer && bytes + size > 6000) { parts.push(buffer); buffer = ""; bytes = 0; }
+    buffer += character; bytes += size;
+  }
+  if (buffer) parts.push(buffer);
+  return parts.length ? parts : [""];
+};
 const benignHoverError = error =>
   error?.code === "window_changed" || error?.code === "no_visible_window" || error?.code === "not_running";
 const modifiers = keys => ({
@@ -86,7 +99,7 @@ export function createMacWindowInput({ element, frame, active, request, onError,
     if (!active() || !frame() || (drag && drag.pointer !== event.pointerId)) return;
     const hover = !drag && !event.buttons;
     const target = drag?.target || { ...frame() };
-    const fields = { phase: "move", buttons: event.buttons, ...point(event),
+    const fields = { phase: "move", buttons: event.buttons & 7, ...point(event),
       shift: event.shiftKey, control: event.ctrlKey, alt: event.altKey, command: event.metaKey };
     if (hover) {
       const hoverKey = `${identity(target)}:${Math.round(fields.x * 500)}:${Math.round(fields.y * 500)}:${fields.shift ? 1 : 0}${fields.control ? 1 : 0}${fields.alt ? 1 : 0}${fields.command ? 1 : 0}`;
@@ -177,7 +190,7 @@ export function createMacWindowInput({ element, frame, active, request, onError,
     target: () => frame() && { ...frame() },
     setKeyboardTarget(target) { keyboard = target; keyboard?.classList.add("mac-claude-typing"); },
     focus,
-    pasteText: text => send("text", { text }),
+    pasteText: text => textParts(text).reduce((chain, part) => chain.then(() => send("text", { text: part })), Promise.resolve()),
     sendKey(symbol, code, down) {
       const target = frame() && { ...frame() };
       report(run(() => key(symbol, code, down, target)));

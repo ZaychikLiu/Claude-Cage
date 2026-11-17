@@ -27,6 +27,7 @@ const messages = {
   unknown_action: "客机窗口输入组件需要更新，请在环境设置中更新组件后重试。",
   input_connection_required: "窗口输入需要重新连接，请恢复画面后重试。",
   input_owned_by_another_view: "另一个连接正在操作此窗口，请等待它释放按键或拖动。",
+  invalid_input: "这次输入没有被客机接受，请重试。",
 };
 
 async function windowRequest(base, action, fields = {}, connection) {
@@ -69,6 +70,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
   const connection = useRef(null);
   const [inputChannel, setInputChannel] = useState(null);
   const frameConnection = useRef(null);
+  const windowChanges = useRef(0);
   const request = (action, fields) => windowRequest(base, action, fields, connection.current);
   const [zoom, setZoom] = useDesktopZoom();
   const [smoothMode, setSmoothMode] = useState(() => {
@@ -139,6 +141,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
         acknowledge: next.acknowledge,
       });
       setError("");
+      windowChanges.current = 0;
     }
     async function poll() {
       let delay = 2200;
@@ -172,7 +175,9 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
                 frameConnection.current = null;
                 nextStatus = 0;
                 frame.current = null;
-                if (reason === "window_changed") return;
+                // A one-off bounds change recovers on the next poll; a window
+                // that keeps moving must surface instead of freezing silently.
+                if (reason === "window_changed" && ++windowChanges.current <= 3) return;
                 if (reason === "no_visible_window" && !autoRelaunched) {
                   autoRelaunched = true;
                   launched.current = false;

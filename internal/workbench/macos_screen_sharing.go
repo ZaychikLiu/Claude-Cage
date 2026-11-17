@@ -37,6 +37,8 @@ var (
 // macOSScreenSharing is the cage-serve-owned SSH local forward to guest 5900.
 // Hooks are for tests; nil uses production gate, ssh, inspect, kickstart and open(1) behavior.
 type macOSScreenSharing struct {
+	// ensureMu serializes rebuilds; mu only guards the fields below.
+	ensureMu  sync.Mutex
 	mu        sync.Mutex
 	done      <-chan struct{}
 	cancel    context.CancelFunc
@@ -569,39 +571,71 @@ func (s *Server) probeBoundScreenSharing(ctx context.Context, addr string) error
 	return probeScreenSharingRFB(probeCtx, addr)
 }
 
-func (s *Server) ensureMacOSScreenSharingTunnel(ctx context.Context) (int, error) {
-	session := &s.screenSharing
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	s.mu.Lock()
-	ready := s.ready && !s.closing
-	life := s.lifetimeContextLocked()
-	s.mu.Unlock()
-	if !ready {
-		return 0, errScreenSharingNotReady
+var (
+	screenSharingOpenBudget       = 25 * time.Second
+	screenSharingKickstartBudget  = 6 * time.Second
+	screenSharingKickstartBackoff = []time.Duration{150 * time.Millisecond, 300 * time.Millisecond, 600 * time.Millisecond, 1200 * time.Millisecond}
+)
+
+// screenSharingTunnel is one running ssh -L forward. The command is bound to
+// the server lifetime, so stopping the environment always reaps it.
+type screenSharingTunnel struct {
+	cancel context.CancelFunc
+	done   <-chan struct{}
+	port   int
+}
+
+func (t *screenSharingTunnel) stop() {
+	if t == nil {
+		return
 	}
-	// Bound reuse check independently so a stalled old tunnel cannot exhaust
-	// the timeout budget needed to launch and verify a replacement tunnel.
-	if session.aliveLocked() {
-		reuseCtx, cancelReuse := context.WithTimeout(ctx, screenSharingReuseProbeTimeout)
-		reuseErr := probeScreenSharingRFB(reuseCtx, net.JoinHostPort("127.0.0.1", strconv.Itoa(session.port)))
-		cancelReuse()
-		if reuseErr == nil && session.aliveLocked() {
-			return session.port, nil
-		}
+	if t.cancel != nil {
+		t.cancel()
 	}
-	session.stopLocked()
+	if t.done != nil {
+		<-t.done
+	}
+}
+
+func (ss *macOSScreenSharing) current() (int, bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.port, ss.aliveLocked()
+}
+
+func (ss *macOSScreenSharing) owns(port int) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.port == port && ss.aliveLocked()
+}
+
+// swap installs next and returns whatever was installed before it.
+func (ss *macOSScreenSharing) swap(next *screenSharingTunnel) *screenSharingTunnel {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	old := &screenSharingTunnel{cancel: ss.cancel, done: ss.done, port: ss.port}
+	if next == nil {
+		ss.cancel, ss.done, ss.port = nil, nil, 0
+	} else {
+		ss.cancel, ss.done, ss.port = next.cancel, next.done, next.port
+	}
+	return old
+}
+
+// startMacOSScreenSharingTunnel launches one forward and waits for ssh to
+// report that it authenticated and bound the loopback port.
+func (s *Server) startMacOSScreenSharingTunnel(ctx context.Context, life context.Context) (*screenSharingTunnel, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return 0, errors.New("无法在本机环回地址上分配屏幕共享端口")
+		return nil, errors.New("无法在本机环回地址上分配屏幕共享端口")
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	if err := ln.Close(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	args, err := guestos.MacOSScreenSharingSSHArgs(s.profile, s.macosGuest.User, port)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	args = append(args, "cage-macos")
 	cmdCtx, cancel := context.WithCancel(life)
@@ -610,16 +644,16 @@ func (s *Server) ensureMacOSScreenSharingTunnel(ctx context.Context) (int, error
 	host.HideCommandWindow(cmd)
 	if cmd.Err != nil {
 		cancel()
-		return 0, errors.New("无法准备客机 SSH 转发")
+		return nil, errors.New("无法准备客机 SSH 转发")
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return 0, err
+		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return 0, errors.New("无法启动客机 SSH 转发")
+		return nil, errors.New("无法启动客机 SSH 转发")
 	}
 	// OpenSSH emits the marker from its fixed LocalCommand only after it
 	// authenticates the guest and binds the requested port. A different
@@ -633,40 +667,127 @@ func (s *Server) ensureMacOSScreenSharingTunnel(ctx context.Context) (int, error
 		_ = cmd.Wait()
 		close(done)
 	}()
-	session.cancel, session.done, session.port = cancel, done, port
+	tunnel := &screenSharingTunnel{cancel: cancel, done: done, port: port}
 	bindCtx, cancelBind := context.WithTimeout(ctx, screenSharingTunnelBindTimeout)
 	defer cancelBind()
-	var sshBound bool
 	select {
-	case sshBound = <-bound:
+	case ok := <-bound:
+		if ok {
+			return tunnel, nil
+		}
 	case <-bindCtx.Done():
 	case <-life.Done():
 	}
-	if !sshBound || !session.aliveLocked() {
-		session.stopLocked()
-		return 0, errScreenSharingUnreachable
+	tunnel.stop()
+	return nil, errScreenSharingUnreachable
+}
+
+func (s *Server) ensureMacOSScreenSharingTunnel(ctx context.Context) (int, error) {
+	session := &s.screenSharing
+	session.ensureMu.Lock()
+	defer session.ensureMu.Unlock()
+
+	s.mu.Lock()
+	ready := s.ready && !s.closing
+	life := s.lifetimeContextLocked()
+	s.mu.Unlock()
+	if !ready {
+		return 0, errScreenSharingNotReady
 	}
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	probeErr := s.probeBoundScreenSharing(ctx, addr)
-	if probeErr == nil && session.aliveLocked() {
-		return port, nil
+	// The request context only decides whether this caller still wants the
+	// answer. Probing and rebuilding run on the server lifetime so that a
+	// closed tab cannot tear down a forward that other viewers are using.
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
-	if errors.Is(probeErr, errScreenSharingTimedOut) && s.recoverHungMacOSScreenSharing(ctx) == nil {
-		for attempt := 0; attempt < 3 && ctx.Err() == nil && life.Err() == nil && session.aliveLocked(); attempt++ {
+	workCtx, cancelWork := context.WithTimeout(life, screenSharingOpenBudget)
+	defer cancelWork()
+
+	if port, alive := session.current(); alive {
+		reuseCtx, cancelReuse := context.WithTimeout(workCtx, screenSharingReuseProbeTimeout)
+		reuseErr := probeScreenSharingRFB(reuseCtx, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		cancelReuse()
+		if reuseErr == nil && session.owns(port) {
+			return port, nil
+		}
+		// A stalled daemon can leave an established viewer alive, so the
+		// replacement is built and verified before the old one is retired.
+	}
+
+	tunnel, err := s.startMacOSScreenSharingTunnel(workCtx, life)
+	if err != nil {
+		return 0, err
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(tunnel.port))
+	probeErr := s.probeBoundScreenSharing(workCtx, addr)
+	if probeErr != nil && errors.Is(probeErr, errScreenSharingTimedOut) && s.recoverHungMacOSScreenSharing(workCtx) == nil {
+		deadline := time.Now().Add(screenSharingKickstartBudget)
+		for attempt := 0; probeErr != nil && time.Now().Before(deadline) && workCtx.Err() == nil && life.Err() == nil; attempt++ {
 			if attempt > 0 {
-				time.Sleep(150 * time.Millisecond)
+				time.Sleep(screenSharingKickstartBackoff[min(attempt-1, len(screenSharingKickstartBackoff)-1)])
 			}
-			probeErr = s.probeBoundScreenSharing(ctx, addr)
-			if probeErr == nil && session.aliveLocked() {
-				return port, nil
-			}
+			probeErr = s.probeBoundScreenSharing(workCtx, addr)
 		}
 	}
-	session.stopLocked()
-	if errors.Is(probeErr, errScreenSharingTimedOut) {
-		return 0, errScreenSharingTimedOut
+	if probeErr != nil {
+		tunnel.stop()
+		return 0, probeErr
 	}
-	return 0, errScreenSharingUnreachable
+	if life.Err() != nil {
+		tunnel.stop()
+		return 0, errScreenSharingNotReady
+	}
+	old := session.swap(tunnel)
+	old.stop()
+	go s.watchMacOSScreenSharing(tunnel.port, tunnel.done, life)
+	return tunnel.port, nil
+}
+
+// screenSharingWatchInterval and screenSharingWatchFailures bound automatic
+// recovery of a wedged guest daemon. A viewer that keeps reconnecting is the
+// visible symptom; the cause is the daemon's accept loop stalling on a
+// half-closed socket, which only a restart clears.
+var (
+	screenSharingWatchInterval = 20 * time.Second
+	screenSharingWatchTimeout  = 2 * time.Second
+	screenSharingWatchFailures = 3
+)
+
+func (s *Server) watchMacOSScreenSharing(port int, done <-chan struct{}, life context.Context) {
+	ticker := time.NewTicker(screenSharingWatchInterval)
+	defer ticker.Stop()
+	failures := 0
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	for {
+		select {
+		case <-done:
+			return
+		case <-life.Done():
+			return
+		case <-ticker.C:
+		}
+		probeCtx, cancel := context.WithTimeout(life, screenSharingWatchTimeout)
+		err := probeScreenSharingRFB(probeCtx, addr)
+		cancel()
+		if err == nil {
+			failures = 0
+			continue
+		}
+		// A refused connection means the forward itself is gone; the next open
+		// rebuilds it. Only a stalled daemon justifies restarting the service.
+		if !errors.Is(err, errScreenSharingTimedOut) {
+			failures = 0
+			continue
+		}
+		failures++
+		if failures < screenSharingWatchFailures {
+			continue
+		}
+		failures = 0
+		recoverCtx, cancelRecover := context.WithTimeout(life, 6*time.Second)
+		_ = s.recoverHungMacOSScreenSharing(recoverCtx)
+		cancelRecover()
+	}
 }
 
 func (ss *macOSScreenSharing) aliveLocked() bool {
@@ -682,17 +803,5 @@ func (ss *macOSScreenSharing) aliveLocked() bool {
 }
 
 func (s *Server) closeMacOSScreenSharing() {
-	s.screenSharing.mu.Lock()
-	defer s.screenSharing.mu.Unlock()
-	s.screenSharing.stopLocked()
-}
-
-func (ss *macOSScreenSharing) stopLocked() {
-	if ss.cancel != nil {
-		ss.cancel()
-		<-ss.done
-		ss.cancel = nil
-		ss.done = nil
-		ss.port = 0
-	}
+	s.screenSharing.swap(nil).stop()
 }

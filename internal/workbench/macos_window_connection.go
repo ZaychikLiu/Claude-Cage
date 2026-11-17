@@ -119,7 +119,16 @@ func (s *Server) macOSWindowConnection(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !validMacOSWindowRequest(message.Request) {
-			return
+			// One malformed request must not take down the whole input channel;
+			// the viewer reports it and keeps typing on the same connection.
+			_ = ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if ws.WriteJSON(struct {
+				ID     uint64         `json:"id"`
+				Result map[string]any `json:"result"`
+			}{message.ID, map[string]any{"error": "invalid_input"}}) != nil {
+				return
+			}
+			continue
 		}
 		browser := macOSBrowserWindowRoute(r)
 		if browser {

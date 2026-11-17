@@ -39,11 +39,16 @@ test("web copy stops before key injection after its target changes", async () =>
 });
 function fixture({ available = true } = {}) {
   const sent = [], writes = [], active = [], notices = [], released = [];
-  let revision = 1, content = { text: "host initial" }, pauseRead, pauseWrite, nativeGeneration = 0, delayAcks = false;
+  let revision = 1, content = { text: "host initial" }, pauseRead, pauseWrite, nativeGeneration = 0, delayAcks = false, rejectNext = false;
   const pendingAcks = [];
   const socket = { readyState: 1, send: text => {
     const value = JSON.parse(text);
-    sent.push(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "serial")));
+    sent.push(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "serial" && key !== "basedOn")));
+    if (rejectNext) {
+      rejectNext = false;
+      queueMicrotask(() => socket.onmessage({ data: JSON.stringify({ error: "superseded", serial: value.serial }) }));
+      return;
+    }
     if (delayAcks) pendingAcks.push(value.serial);
     else queueMicrotask(() => socket.onmessage({ data: JSON.stringify({ ack: value.serial }) }));
   }, close() { this.readyState = 3; this.onclose?.(); } };
@@ -74,6 +79,7 @@ function fixture({ available = true } = {}) {
     guest: value => socket.onmessage({ data: JSON.stringify(value) }),
     readDelay: value => { pauseRead = value; }, writeDelay: value => { pauseWrite = value; },
     delayAcks: () => { delayAcks = true; },
+    rejectNextWrite: () => { rejectNext = true; },
     acknowledge: () => {
       assert.ok(pendingAcks.length, "a guest acknowledgement is pending");
       socket.onmessage({ data: JSON.stringify({ ack: pendingAcks.shift() }) });
@@ -368,5 +374,42 @@ test("queued repoll sends a host copy made while an earlier poll is in flight an
     assert.deepEqual(f.sent.at(-1), { text: "second copy" });
     f.guest({ hello: { version: 1, os: "windows", session: "gui-locked", formats: ["text", "png", "files"], available: false } });
     assert.equal(f.controller.ready(), false);
+  } finally { f.controller.dispose(); }
+});
+
+test("a refused snapshot yields to the guest copy instead of overwriting it", async () => {
+  const f = fixture();
+  try {
+    await settle();
+    await settle();
+    // The guest copies while a host snapshot is in flight and refuses it.
+    f.rejectNextWrite();
+    f.host({ text: "host second" });
+    await f.controller.poll();
+    await settle();
+    await settle();
+    // Its own copy then arrives and must be the one that reaches the host.
+    f.guest({ text: "guest copy", revision: 9 });
+    await settle();
+    await settle();
+    assert.deepEqual(f.writes.at(-1), { text: "guest copy" });
+    // The refused host snapshot must not be offered again once the guest won.
+    const before = f.sent.length;
+    await f.controller.poll();
+    await settle();
+    assert.equal(f.sent.length, before);
+  } finally { f.controller.dispose(); }
+});
+
+test("an explicit paste gives up instead of waiting on a stuck snapshot", async () => {
+  const f = fixture();
+  try {
+    await settle();
+    await settle();
+    f.readDelay(new Promise(() => {}));
+    f.host({ text: "stuck" });
+    const started = Date.now();
+    await assert.rejects(f.controller.sync(), /超时/);
+    assert.ok(Date.now() - started < 7000);
   } finally { f.controller.dispose(); }
 });

@@ -55,6 +55,11 @@ type clipboardPayload struct {
 	Serial  int             `json:"serial,omitempty"`
 	Ack     int             `json:"ack,omitempty"`
 	Release []string        `json:"release,omitempty"`
+	// BasedOn is the guest pasteboard revision the host built a snapshot from;
+	// the guest rejects the write when its clipboard moved on in the meantime.
+	BasedOn *int `json:"basedOn,omitempty"`
+	// Revision carries the guest revision on acknowledgements and snapshots.
+	Revision *int `json:"revision,omitempty"`
 }
 
 type clipboardHello struct {
@@ -64,6 +69,7 @@ type clipboardHello struct {
 	Formats     []string `json:"formats"`
 	Available   bool     `json:"available"`
 	FileRelease bool     `json:"file_release,omitempty"`
+	Revision    *int     `json:"revision,omitempty"`
 }
 
 // The profile chooses the transport. A guest file selection can never choose

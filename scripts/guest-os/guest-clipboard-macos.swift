@@ -307,6 +307,7 @@ private final class ClipboardAgent: @unchecked Sendable {
         return ["hello": ["version": 1, "os": "darwin", "session": session, "formats": ["text", "png", "files"],
                           "available": gui && files,
                           "file_release": true,
+                          "revision": board.changeCount,
                           "reason": !gui ? "requires_gui_login" : (!files ? "files_helper_missing" : "")]]
     }
     private func record(_ files: [String], copied: Bool = false) {
@@ -435,7 +436,10 @@ private final class ClipboardAgent: @unchecked Sendable {
         try onGUI {
             if value["release"] != nil { retireCopies(try paths(value["release"])); return ["released": true] }
             try check()
-            if let expected = value["revision"] as? Int, expected != board.changeCount { throw ClipboardFailure("superseded") }
+            // The host sends the guest revision its snapshot was based on.
+            // A local copy made while that snapshot was in flight wins; the
+            // rejected write is then followed by our own publish.
+            if let basedOn = value["basedOn"] as? Int, basedOn != board.changeCount { throw ClipboardFailure("superseded") }
             if value["files"] != nil {
                 let selected = try paths(value["files"])
                 guard selected.allSatisfy({ known.contains($0) }) else { throw ClipboardFailure("unregistered_files") }
@@ -536,16 +540,21 @@ private final class ClipboardAgent: @unchecked Sendable {
                 onGUI { streams[fd] = connection }
                 try connection.send(onGUI { hello() })
                 while let line = try reader.line() {
+                    let message = try json(line)
+                    if let serial = message["ping"] as? Int {
+                        try connection.send(["ack": serial])
+                        continue
+                    }
                     do {
-                        let message = try json(line)
-                        if let serial = message["ping"] as? Int {
-                            try connection.send(["ack": serial])
-                            continue
-                        }
                         let reply = try apply(message, echo: false)
                         onGUI { connection.initialized = true }
                         try connection.send(reply)
-                    } catch { try connection.send(["error": (error as? ClipboardFailure)?.reason ?? "clipboard_write_failed"]) }
+                    } catch {
+                        // Keep the serial on failures so the host can tell which
+                        // write was refused instead of waiting for its timeout.
+                        try connection.send(["error": (error as? ClipboardFailure)?.reason ?? "clipboard_write_failed",
+                                             "serial": message["serial"] as? Int ?? 0])
+                    }
                 }
             case "read":
                 let value = try snapshot()
