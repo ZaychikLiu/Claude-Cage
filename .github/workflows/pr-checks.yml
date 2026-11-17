@@ -29,7 +29,7 @@ jobs:
           website=false
           while IFS= read -r -d '' path; do
             case "$path" in
-              README*.md|www/*|docs/guide/*|docs/releases/*) ;;
+              README*.md|www/*|docs/guide/*|docs/releases/*|assets/claude-cage-character.png|assets/community-browser-check-cropped.png|assets/community-browser-check.png|assets/community-qq.png|assets/community-wechat.png|assets/network-checks.png) ;;
               *) platforms=true ;;
             esac
             case "$path" in

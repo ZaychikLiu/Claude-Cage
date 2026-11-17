@@ -6,9 +6,11 @@
 
 <img src="assets/claude-cage-character.png" alt="Claude Cage" width="320" />
 
-[![Release](https://img.shields.io/github/v/release/Lee-xeo/Claude-Cage?include_prereleases)](https://github.com/Lee-xeo/Claude-Cage/releases) [![CI](https://github.com/Lee-xeo/Claude-Cage/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Lee-xeo/Claude-Cage/actions/workflows/ci.yml) [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/Lee-xeo/Claude-Cage?include_prereleases)](https://github.com/Lee-xeo/Claude-Cage/releases) [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <a href="https://trendshift.io/repositories/339051#achievements"><img src="https://trendshift.io/api/badge/trendshift/repositories/339051/daily?language=Go" alt="Trendshift — Go Repository of the Day" width="250" height="55" /></a> <a href="https://trendshift.io/repositories/339051#achievements"><img src="https://trendshift.io/api/badge/trendshift/repositories/339051/weekly?language=Go" alt="Trendshift — Go Repository of the Week" width="250" height="55" /></a>
+
+<a href="https://trendshift.io/repositories/339051#achievements"><img src="https://trendshift.io/api/badge/trendshift/repositories/339051/daily" alt="Trendshift — Repository of the Day" width="250" height="55" /></a> <a href="https://trendshift.io/repositories/339051#achievements"><img src="https://trendshift.io/api/badge/trendshift/repositories/339051/weekly" alt="Trendshift — Repository of the Week" width="250" height="55" /></a>
 
 **[وب سایت پروژه](https://claude-cage.com/) · [دانلود برنامه](https://claude-cage.com/prs/#download) · [شروع کردن](docs/getting-started.md) · [سوالات متداول](docs/troubleshooting.md) · [رهنمای استفاده (چینی)](https://claude-cage.com/docs/)**
 
@@ -115,15 +117,11 @@ macOS و نسخه‌های امضاشدهٔ Windows از پراکسی انتخا
 
 این پروژه به سرعت در حال پیشرفت است. برای به اشتراک گذاشتن بازخورد به گروه جامعه بپیوندید. از نگهبانان جامعه استقبال می شود.
 
-<p align="center">
-  <a href="assets/community-qq.png"><img src="assets/community-qq.png" alt="QQ group · 710792821" width="240" /></a>
-  <br />QQ group · 710792821
-</p>
+| QQ group · 710792821 | WeChat |
+| :---: | :---: |
+| <a href="assets/community-qq.png"><img src="assets/community-qq.png" alt="QQ group · 710792821" width="240" /></a> | <a href="www/src/assets/community-wechat.png"><img src="www/src/assets/community-wechat.png" alt="WeChat" width="240" /></a> |
 
-<p align="center">
-  <a href="assets/community-wechat.png"><img src="assets/community-wechat.png" alt="WeChat" width="240" /></a>
-  <br />WeChat
-</p>
+[Telegram](https://t.me/claude_cage)
 
 ## مبدا و مجوز
 

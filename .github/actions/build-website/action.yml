@@ -19,6 +19,9 @@ runs:
       run: npm ci --prefix www
     - shell: bash
       run: node --test www/scripts/sync-release.test.mjs
+    - name: Check CI path classification
+      shell: bash
+      run: node --test www/scripts/ci-scope.test.mjs
     - name: Agent package discovery and verification
       shell: bash
       run: node --test scripts/agent-bootstrap.test.mjs

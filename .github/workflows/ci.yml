@@ -6,7 +6,17 @@ on:
   # this workflow). A branch without a pull request can be run by hand.
   push:
     branches: [main]
-    paths-ignore: ['README*.md', 'www/**', 'docs/guide/**', 'docs/releases/**']
+    paths-ignore:
+      - 'README*.md'
+      - 'www/**'
+      - 'docs/guide/**'
+      - 'docs/releases/**'
+      - 'assets/claude-cage-character.png'
+      - 'assets/community-browser-check-cropped.png'
+      - 'assets/community-browser-check.png'
+      - 'assets/community-qq.png'
+      - 'assets/community-wechat.png'
+      - 'assets/network-checks.png'
   workflow_call:
   workflow_dispatch:
 permissions:
