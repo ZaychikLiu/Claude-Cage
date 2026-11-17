@@ -346,3 +346,27 @@ test("a failing guest clipboard reconnects with backoff that resets after a succ
   assert.equal(clipboardReconnectDelay(0), 1500);
   assert.equal(clipboardReconnectDelay(100), 30000);
 });
+
+test("queued repoll sends a host copy made while an earlier poll is in flight and ready() tracks session state", async () => {
+  const f = fixture();
+  try {
+    await settle();
+    assert.equal(f.controller.ready(), true);
+    assert.deepEqual(f.sent, [{ text: "host initial" }]);
+    let release;
+    f.host({ text: "first copy" });
+    f.readDelay(new Promise(resolve => { release = resolve; }));
+    const first = f.controller.poll();
+    await settle();
+    f.host({ text: "second copy" });
+    const queued = f.controller.poll();
+    assert.equal(queued, first);
+    release();
+    await first;
+    await settle();
+    await settle();
+    assert.deepEqual(f.sent.at(-1), { text: "second copy" });
+    f.guest({ hello: { version: 1, os: "windows", session: "gui-locked", formats: ["text", "png", "files"], available: false } });
+    assert.equal(f.controller.ready(), false);
+  } finally { f.controller.dispose(); }
+});

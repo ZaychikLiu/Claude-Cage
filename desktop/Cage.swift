@@ -32,6 +32,8 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
     private var clipboardCacheTimer: Timer?
     private var clipboardWatchTimer: Timer?
     private var lastObservedClipboardRevision: Int?
+    private var lastAttemptedClipboardRevision: Int?
+    private var lastAttemptedClipboardAt = Date.distantPast
     private var backgroundActivity: NSObjectProtocol?
     private var loading: NSTextField!
     private var retry: NSButton!
@@ -136,6 +138,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
         }, quit: { [weak self] in self?.allowQuit = true; NSApp.terminate(nil) }, reconnect: { [weak self] in self?.bootstrap() })
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        watchClipboardCaches()
         bootstrap()
     }
     private func makeMenus() {
@@ -307,13 +310,14 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
     private func watchClipboardCaches() {
         if clipboardCacheTimer == nil {
             let cacheTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.collectClipboardCaches() }
+            cacheTimer.tolerance = 0.2
             RunLoop.main.add(cacheTimer, forMode: .common)
             clipboardCacheTimer = cacheTimer
             restoreClipboardCaches()
         }
         if clipboardWatchTimer == nil {
-            lastObservedClipboardRevision = NSPasteboard.general.changeCount
             let watchTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.pollWebViewClipboardIfChanged() }
+            watchTimer.tolerance = 0.05
             RunLoop.main.add(watchTimer, forMode: .common)
             clipboardWatchTimer = watchTimer
         }
@@ -321,8 +325,18 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
     private func pollWebViewClipboardIfChanged() {
         let count = NSPasteboard.general.changeCount
         guard count != lastObservedClipboardRevision else { return }
-        lastObservedClipboardRevision = count
-        webView?.evaluateJavaScript("window.cagePollClipboard?.()", completionHandler: nil)
+        let now = Date()
+        if count == lastAttemptedClipboardRevision, now.timeIntervalSince(lastAttemptedClipboardAt) < 1.0 {
+            return
+        }
+        lastAttemptedClipboardRevision = count
+        lastAttemptedClipboardAt = now
+        webView?.evaluateJavaScript("window.cagePollClipboard?.() ?? false") { [weak self] result, error in
+            guard let self, error == nil, (result as? Bool) == true else { return }
+            if NSPasteboard.general.changeCount == count {
+                self.lastObservedClipboardRevision = count
+            }
+        }
     }
     private func restoreClipboardCaches() {
         clipboardCacheCommand("list") { result, _ in
@@ -345,6 +359,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
         }
     }
     private func collectClipboardCaches() {
+        guard !clipboardCacheLoaded || !clipboardCopies.isEmpty else { return }
         guard clipboardCacheLoaded else { return }
         let selected = (NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly:true]) as? [URL] ?? []).map(\.path)
         let readers = clipboardReaders.values.flatMap { $0 }
@@ -481,7 +496,11 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             replyHandler(true,nil)
         case "clipboardRead": replyHandler(plainClipboardText(NSPasteboard.general),nil)
         case "clipboardRevision": watchClipboardCaches(); replyHandler(NSPasteboard.general.changeCount,nil)
-        case "clipboardSyncCancel": clipboardGeneration += 1; replyHandler(true,nil)
+        case "clipboardSyncCancel":
+            clipboardGeneration += 1
+            lastObservedClipboardRevision = nil
+            lastAttemptedClipboardRevision = nil
+            replyHandler(true,nil)
         case "clipboardSyncRelease":
             guard let id = body["files"] as? String, UUID(uuidString: id) != nil else { replyHandler(nil,"剪贴板文件标识无效"); return }
             fileCommand(["clipboard-files", "--json", "--connection", body["connection_id"] as? String ?? "local", "release", id], reply: replyHandler)
@@ -526,6 +545,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
                           bitmap.pixelsWide <= 40_000_000 / bitmap.pixelsHigh {
                     let image = NSImage(size:bitmap.size); image.addRepresentation(bitmap)
                     board.clearContents(); written = board.writeObjects([image])
+                    if written { _ = board.setData(data, forType: .png) }
                 } else if let text = body["text"] as? String, text.utf8.count <= 2 * 1024 * 1024 {
                     board.clearContents(); written = board.setString(text,forType:.string)
                 } else { replyHandler(nil,"剪贴板内容格式或大小无效"); return }

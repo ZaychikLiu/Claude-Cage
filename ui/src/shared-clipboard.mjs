@@ -18,7 +18,7 @@ export const clipboardReconnectDelay = failures => Math.min(1500 * 2 ** Math.max
 // including while its remote canvas is hidden or the window is unfocused.
 export function shareClipboard({ connect, native, onStatus, setActive, interval = 300, schedule = setTimeout }) {
   let socket, timer, retry, disposed = false, revision, generation = 0, guestReady = false, guestSession, failures = 0;
-  let polling, writes = Promise.resolve(), lastPayload = "", serial = 0, errorShown = false, acknowledgedRevision;
+  let polling, repoll = false, repollInitial = false, writes = Promise.resolve(), lastPayload = "", serial = 0, errorShown = false, acknowledgedRevision;
   let sessionGeneration = 0;
   let sessionController = new AbortController();
   const acknowledgements = new Map();
@@ -39,7 +39,7 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
     generation++; sessionGeneration++;
     sessionController.abort(); sessionController = new AbortController();
     guestReady = false; revision = undefined; acknowledgedRevision = undefined; lastPayload = "";
-    polling = undefined; writes = Promise.resolve();
+    polling = undefined; repoll = false; repollInitial = false; writes = Promise.resolve();
     for (const pending of acknowledgements.values()) pending.reject();
     acknowledgements.clear();
     setActive(false);
@@ -99,10 +99,24 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
       throw new Error("Clipboard synchronization failed");
     } finally { releaseFiles(); }
   };
+  let repollGeneration = 0;
   const poll = (initial = false) => {
     if (!polling) {
-      const current = readHost(initial).finally(() => { if (polling === current) polling = undefined; });
+      repollGeneration = generation;
+      const current = readHost(initial).finally(() => {
+        if (polling === current) {
+          polling = undefined;
+          const shouldRepoll = repoll && repollGeneration === generation && !disposed && guestReady && socket?.readyState === 1;
+          const nextInitial = repollInitial;
+          repoll = false;
+          repollInitial = false;
+          if (shouldRepoll) void poll(nextInitial).catch(warn);
+        }
+      });
       polling = current;
+    } else if (repollGeneration === generation) {
+      repoll = true;
+      repollInitial = repollInitial || initial;
     }
     return polling;
   };
@@ -169,7 +183,7 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
     socket.onerror = () => { /* onclose owns reconnects. */ };
   };
   open();
-  return { poll, async sync() {
+  return { poll, ready: () => !disposed && guestReady && socket?.readyState === 1, async sync() {
     const signal = sessionController.signal;
     requireSession(signal);
     for (;;) {

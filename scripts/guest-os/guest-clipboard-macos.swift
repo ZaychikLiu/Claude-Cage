@@ -167,9 +167,23 @@ private func boardContent(_ board: NSPasteboard) throws -> [String: Any] {
         return ["png": value.base64EncodedString()]
     }
     if let value = board.data(forType: .tiff) { return ["png": try png(image(value)).base64EncodedString()] }
+    if let types = board.types, !Set(types.map(\.rawValue)).isDisjoint(with: Set(NSImage.imageTypes)),
+       let native = NSImage(pasteboard: board), let tiff = native.tiffRepresentation {
+        return ["png": try png(image(tiff)).base64EncodedString()]
+    }
     let value = optionalPlainClipboardText(board) ?? ""
     guard value.utf8.count <= textLimit else { throw ClipboardFailure("text_too_large") }
     return ["text": value]
+}
+
+private func normalizeLegacyPlainText(_ board: NSPasteboard) {
+    if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty { return }
+    if board.data(forType: .png) != nil || board.data(forType: .tiff) != nil ||
+       board.data(forType: .rtf) != nil || board.data(forType: .rtfd) != nil || board.data(forType: .html) != nil { return }
+    if let types = board.types, !Set(types.map(\.rawValue)).isDisjoint(with: Set(NSImage.imageTypes)) { return }
+    guard board.string(forType: .string) == nil, let fallback = optionalPlainClipboardText(board), !fallback.isEmpty, fallback.utf8.count <= textLimit else { return }
+    board.clearContents()
+    _ = board.setString(fallback, forType: .string)
 }
 
 private func setBoard(_ board: NSPasteboard, _ value: [String: Any]) throws {
@@ -183,6 +197,7 @@ private func setBoard(_ board: NSPasteboard, _ value: [String: Any]) throws {
         let native = NSImage(cgImage: bitmap, size: .zero)
         board.clearContents()
         guard board.writeObjects([native]) else { throw ClipboardFailure("clipboard_write_failed") }
+        _ = board.setData(data, forType: .png)
     } else {
         let files = try paths(value["files"])
         board.clearContents()
@@ -459,6 +474,7 @@ private final class ClipboardAgent: @unchecked Sendable {
             for stream in streams.values { stream.close() }
         }
         guard current, !snapshotPending, streams.values.contains(where: { $0.initialized }), revision != board.changeCount else { return }
+        normalizeLegacyPlainText(board)
         revision = board.changeCount
         snapshotPending = true
         let capturedSession = session
@@ -745,6 +761,14 @@ private func testAgentTransport(_ board: NSPasteboard) throws {
             guard let acknowledged = try reader.line(), try json(acknowledged)["ack"] as? Int == 9 else { throw ClipboardFailure("test_ack_failed") }
             onGUI { board.clearContents(); board.setString("guest pushed text", forType: .string); agent.poll() }
             guard let pushed = try reader.line(), try json(pushed)["text"] as? String == "guest pushed text" else { throw ClipboardFailure("test_push_failed") }
+            onGUI {
+                board.clearContents()
+                board.setData("normalized legacy text".data(using: .utf8), forType: NSPasteboard.PasteboardType("com.apple.traditional-mac-plain-text"))
+                board.setData("normalized legacy text".data(using: .utf8), forType: NSPasteboard.PasteboardType("com.trolltech.anymime.text--plain"))
+                agent.poll()
+            }
+            guard let normalizedPush = try reader.line(), try json(normalizedPush)["text"] as? String == "normalized legacy text",
+                  onGUI({ board.string(forType: .string) == "normalized legacy text" }) else { throw ClipboardFailure("test_legacy_normalization_failed") }
 
             var bytes = Data([0, 255, 128, 10])
             var length = UInt32(bytes.count).littleEndian
