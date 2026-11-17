@@ -354,6 +354,10 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 				}
 				switch contentType {
 				case "application/json", "text/plain", "text/event-stream", "application/octet-stream", "application/zip", "image/png", "image/jpeg", "image/webp":
+				case "application/x-tar":
+					if !strings.HasPrefix(response.Request.URL.Path, "/api/clipboard/files/") {
+						return errors.New("remote active content is refused")
+					}
 				default:
 					return errors.New("remote active content is refused")
 				}

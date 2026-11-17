@@ -295,7 +295,7 @@ func (s *Server) sharedClipboard(w http.ResponseWriter, r *http.Request) {
 	writeGuest := func(payload clipboardPayload) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		timeout := time.AfterFunc(8*time.Second, func() { cancel(); in.Close() })
+		timeout := time.AfterFunc(30*time.Second, func() { cancel(); in.Close() })
 		defer timeout.Stop()
 		return json.NewEncoder(in).Encode(payload)
 	}

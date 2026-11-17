@@ -6,12 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/clipboardfiles"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
@@ -291,5 +293,82 @@ func TestRemoteAutoReleasesOnlyOwnedLocalService(t *testing.T) {
 				t.Fatalf("auto used the wrong owner or directly stopped a controller: err=%v suspensions=%d", err, f.suspended.Load())
 			}
 		})
+	}
+}
+
+func TestDesktopGatewayProxiesClipboardArchiveAndTrailer(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "sample.txt")
+	if err := os.WriteFile(source, []byte("archive payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := testServer(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/clipboard/files/00000000-0000-0000-0000-000000000000" {
+			w.Header().Set("Content-Type", "application/x-tar")
+			w.Header().Set("Trailer", "X-Cage-Clipboard-Status")
+			if err := writeClipboardArchive(w, []string{source}); err != nil {
+				t.Errorf("write archive: %v", err)
+				return
+			}
+			w.Header().Set("X-Cage-Clipboard-Status", "ok")
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-tar")
+		_, _ = w.Write([]byte("disallowed"))
+	}))
+	defer upstream.Close()
+	fixture := &gatewayLocalFixture{status: DesktopLocalStatus{Known: true, Available: true}}
+	s.remote = newDesktopGateway(s.profile, fixture)
+	defer s.remote.close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.remote.desktop.mu.Lock()
+	s.remote.desktop.generation = "local-tar-test"
+	s.remote.desktop.active = &desktopTarget{
+		id:      "local-tar-test",
+		mode:    "local",
+		ctx:     ctx,
+		cancel:  cancel,
+		session: &remotehost.Session{Origin: upstream.URL, Client: upstream.Client(), Transport: upstream.Client().Transport, Context: ctx},
+	}
+	s.remote.desktop.mu.Unlock()
+
+	proxyServer := httptest.NewServer(s.handler())
+	defer proxyServer.Close()
+	s.origin = proxyServer.URL
+
+	req, _ := http.NewRequest("GET", proxyServer.URL+"/api/clipboard/files/00000000-0000-0000-0000-000000000000", nil)
+	req.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
+	req.Header.Set("Origin", s.origin)
+	req.Header.Set(connectionHeader, "local-tar-test")
+	resp, err := proxyServer.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("clipboard archive status: %d", resp.StatusCode)
+	}
+	cache := clipboardfiles.CacheStore{Directory: t.TempDir()}
+	selection, err := receiveClipboardArchive(resp, cache)
+	if err != nil || len(selection.Paths) != 1 {
+		t.Fatalf("receiveClipboardArchive failed: %v %+v", err, selection)
+	}
+	data, err := os.ReadFile(selection.Paths[0])
+	if err != nil || string(data) != "archive payload" {
+		t.Fatalf("unexpected received file: %q %v", data, err)
+	}
+
+	blocked, _ := http.NewRequest("GET", proxyServer.URL+"/api/status", nil)
+	blocked.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
+	blocked.Header.Set("Origin", s.origin)
+	blocked.Header.Set(connectionHeader, "local-tar-test")
+	blockedResp, err := proxyServer.Client().Do(blocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedResp.Body.Close()
+	if blockedResp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("unexpected status for non-clipboard tar response: %d", blockedResp.StatusCode)
 	}
 }

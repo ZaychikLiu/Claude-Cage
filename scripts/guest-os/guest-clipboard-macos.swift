@@ -144,6 +144,19 @@ private func png(_ image: CGImage) throws -> Data {
     return data as Data
 }
 
+private func optionalPlainClipboardText(_ board: NSPasteboard) -> String? {
+    if let text = board.string(forType: .string) { return text }
+    for identifier in ["public.plain-text", "com.apple.traditional-mac-plain-text", "public.text"] {
+        let type = NSPasteboard.PasteboardType(identifier)
+        if let text = board.string(forType: type) { return text }
+        if let data = board.data(forType: type) {
+            if let utf8 = String(data: data, encoding: .utf8) { return utf8 }
+            if let macRoman = String(data: data, encoding: .macOSRoman) { return macRoman }
+        }
+    }
+    return nil
+}
+
 private func boardContent(_ board: NSPasteboard) throws -> [String: Any] {
     if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
         guard urls.allSatisfy({ $0.isFileURL && ($0.host == nil || $0.host == "" || $0.host == "localhost") }) else { throw ClipboardFailure("invalid_files") }
@@ -154,7 +167,7 @@ private func boardContent(_ board: NSPasteboard) throws -> [String: Any] {
         return ["png": value.base64EncodedString()]
     }
     if let value = board.data(forType: .tiff) { return ["png": try png(image(value)).base64EncodedString()] }
-    let value = board.string(forType: .string) ?? ""
+    let value = optionalPlainClipboardText(board) ?? ""
     guard value.utf8.count <= textLimit else { throw ClipboardFailure("text_too_large") }
     return ["text": value]
 }
@@ -312,6 +325,7 @@ private final class ClipboardAgent: @unchecked Sendable {
         collectCopies()
     }
     private func collectCopies() {
+        guard !copiesLoaded || !copies.isEmpty else { return }
         guard !collectingCopies else { copiesNeedCollection = true; return }
         collectingCopies = true
         cacheQueue.async {
@@ -424,7 +438,7 @@ private final class ClipboardAgent: @unchecked Sendable {
                 try check(epoch)
                 let captured = board.changeCount
                 guard captured != expected else { return nil }
-                guard let text = board.string(forType: .string), text.utf8.count <= textLimit else { throw ClipboardFailure("clipboard_text_unavailable") }
+                guard let text = optionalPlainClipboardText(board), text.utf8.count <= textLimit else { throw ClipboardFailure("clipboard_text_unavailable") }
                 guard board.changeCount == captured else { return nil }
                 return ["text": text, "revision": captured, "session": session]
             }
@@ -771,6 +785,9 @@ private func selfTest() throws {
     defer { board.releaseGlobally() }
     let text = "中文🙂\nexact text"
     try setBoard(board, ["text": text]); guard try boardContent(board)["text"] as? String == text else { throw ClipboardFailure("text_test_failed") }
+    board.clearContents()
+    board.setData("legacy plain text".data(using: .utf8), forType: NSPasteboard.PasteboardType("com.apple.traditional-mac-plain-text"))
+    guard try boardContent(board)["text"] as? String == "legacy plain text" else { throw ClipboardFailure("traditional_text_test_failed") }
     let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 11, pixelsHigh: 7, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     let value = bitmap.representation(using: .png, properties: [:])!
     try setBoard(board, ["png": value.base64EncodedString()]); let actual = try boardContent(board)

@@ -283,6 +283,18 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             }
         }
     }
+    private func plainClipboardText(_ board: NSPasteboard) -> String {
+        if let text = board.string(forType: .string) { return text }
+        for identifier in ["public.plain-text", "com.apple.traditional-mac-plain-text", "public.text"] {
+            let type = NSPasteboard.PasteboardType(identifier)
+            if let text = board.string(forType: type) { return text }
+            if let data = board.data(forType: type) {
+                if let utf8 = String(data: data, encoding: .utf8) { return utf8 }
+                if let macRoman = String(data: data, encoding: .macOSRoman) { return macRoman }
+            }
+        }
+        return ""
+    }
     private func browserFile(_ operation: String, id: String, connection: String = "local", path: String? = nil, reply: @escaping (Any?, String?) -> Void) {
         guard UUID(uuidString: id) != nil else { reply(nil,"下载标识无效"); return }
         fileCommand(["browser-file", "--json", "--connection", connection, operation, id] + (path.map { [$0] } ?? []), reply: reply)
@@ -467,7 +479,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             UserDefaults.standard.set(value, forKey: "cage.windowAppearance")
             applyAppearance(value)
             replyHandler(true,nil)
-        case "clipboardRead": replyHandler(NSPasteboard.general.string(forType:.string) ?? "",nil)
+        case "clipboardRead": replyHandler(plainClipboardText(NSPasteboard.general),nil)
         case "clipboardRevision": watchClipboardCaches(); replyHandler(NSPasteboard.general.changeCount,nil)
         case "clipboardSyncCancel": clipboardGeneration += 1; replyHandler(true,nil)
         case "clipboardSyncRelease":
@@ -493,7 +505,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
                 guard bitmap.pixelsWide > 0, bitmap.pixelsHigh > 0, bitmap.pixelsWide <= 40_000_000 / bitmap.pixelsHigh,
                       let png = bitmap.representation(using:.png,properties:[:]), png.count <= 20 * 1024 * 1024 else { replyHandler(nil,"图片不能超过 20 MB 或 4000 万像素"); return }
                 replyHandler(["revision":revision,"png":png.base64EncodedString()],nil)
-            } else { replyHandler(["revision":revision,"text":board.string(forType:.string) ?? ""],nil) }
+            } else { replyHandler(["revision":revision,"text":plainClipboardText(board)],nil) }
         case "clipboardSyncWrite":
             watchClipboardCaches()
             let board = NSPasteboard.general
@@ -543,7 +555,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
                     replyHandler(nil,"图片不能超过 20 MB 或 4000 万像素"); return
                 }
                 replyHandler(["png":png.base64EncodedString()],nil)
-            } else { replyHandler(["text":board.string(forType:.string) ?? ""],nil) }
+            } else { replyHandler(["text":plainClipboardText(board)],nil) }
         case "chooseGuestMedia":
             guard !nativeFilePanelOpen else { replyHandler(nil,"请先完成当前文件窗口"); return }
             let panel = NSOpenPanel()

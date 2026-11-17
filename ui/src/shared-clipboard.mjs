@@ -57,7 +57,8 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
   const warn = () => { if (!disposed && !errorShown) { errorShown = true; onStatus("剪贴板共享暂未完成，请检查文件是否仍存在及大小限制。"); } };
   const send = (connection, content) => new Promise((resolve, reject) => {
     const id = ++serial;
-    const timeout = setTimeout(() => { acknowledgements.delete(id); reject(new Error("Clipboard acknowledgement timed out")); }, 8000);
+    const timeoutMs = content.png ? 30000 : 10000;
+    const timeout = setTimeout(() => { acknowledgements.delete(id); reject(new Error("Clipboard acknowledgement timed out")); }, timeoutMs);
     acknowledgements.set(id, { resolve: () => { clearTimeout(timeout); resolve(); }, reject: () => { clearTimeout(timeout); reject(new Error("Clipboard disconnected")); } });
     try { connection.send(JSON.stringify({ ...content, serial: id })); }
     catch { acknowledgements.get(id)?.reject(); acknowledgements.delete(id); }
