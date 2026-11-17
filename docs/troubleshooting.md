@@ -177,6 +177,23 @@ Cage 不自动读取主机上的 Claude 登录。请在 Cage 终端运行 `claud
 
 ## 提交问题时提供什么
 
+### macOS 客机权限、签名与运行常见坑
+
+1. **为什么客机弹窗索要管理员密码且用户不知道密码？**  
+   为防止沙箱内运行的 Agent 或脚本通过 `sudo` 擅自改写系统 TCC 权限或防火墙策略，虚拟 Mac 的日常账户（如当前登录账户）故意设为普通标准用户（非 `admin` 组）。管理员权限归宿主机托管的置备账户（`cageprovision`）所有。在原生「屏幕共享」里打开隐私设置时不要手动猜密码，应返回 Cage 的 **“设置 → 环境与恢复 → 客机系统权限”**，点击「屏幕录制权限」或「辅助功能权限」在受限维护窗口中操作，按提示填入管理员用户名后选中密码框，再点击顶部 **「填写管理员密码」** 由宿主机服务验证目标窗口后代填。
+2. **重编或切换 ad-hoc 本地签名构建后，`screen` / `input` 开关亮着但仍提示未授权？**  
+   当 `Cage Guest Window.app` 为 ad-hoc 本地签名（`TeamIdentifier=not set`）时，每次重编都会产生新的 `CDHash`。macOS 的「屏幕录制」与「辅助功能」列表如果还保留着旧版本记录，底层仍然绑定在旧签名或旧 `CDHash` 上；仅把开关关掉再开不会刷新签名绑定。需要在列表里**先选中 `Cage Guest Window` 点左下角 `-` 删除旧项，再点 `+` 重新添加 `/Applications/Cage Guest Window.app` 并开启开关**（如提示 Quit & Reopen，确认重启应用即可）。此外确认客机内只保留唯一的 `/Applications/Cage Guest Window.app`，避免旧备份副本干扰匹配；可通过权限页的 **「重新检查客机权限」** 直接查看签名类型、`CDHash`、重复副本与实时权限状态。
+3. **点击维护授权提示“授权窗口被其他客机窗口遮挡（如 `screencapture`）”？**  
+   为了防止弹窗劫持，维护探测发现有任何非白名单窗口盖在系统设置上方时会拒绝进入密码代填。常见原因是在原生「屏幕共享」中按过截图快捷键后，客机残留了等待框选的 `/usr/sbin/screencapture` 透明全屏选区层（且受系统保护，普通用户 `kill` 会报 `operation not permitted`）。切回原生「屏幕共享」按一次 `Esc` 取消截图选区（并关掉残留的旧管理员密码弹窗），再重新在 Cage 内打开维护设置即可。
+4. **旧预览版点击“屏幕录制权限 / 辅助功能权限”导致整个虚拟 Mac 突然退出（误以为断网）？**  
+   `v0.1.8-beta.2` 引入的登录视图尺寸读取逻辑曾误在 `dispatch_get_main_queue()` 主队列中访问 `VZVirtualMachine.graphicsDevices`；由于 `Code-Hex/vz` 将虚拟机绑定在私有串行队列上，触发 `Virtualization.framework` 的 `_dispatch_assert_queue_fail`（`SIGTRAP`）并带停 `hostagent`。修复后的构建会在 `vmQueue` 上先读取显示规格再回到主队列创建视图（见 `internal/maclogin/bridge_darwin.m`）。遇到整机突然断开时，先查看 `~/.claude-cage/state/lima/mac/ha.stderr.log` 确认是否为宿主进程退出而非纯代理断网。
+5. **macOS 客机大版本升级或扩盘后，冷启动停在锁屏界面？**  
+   系统升级或清理镜像期间可能向 `/Library/Preferences/com.apple.loginwindow` 写入 `autoLoginUserScreenLocked = 1`，导致开启自动登录的客机重启后仍停在锁屏页并阻塞环境就绪。扩展磁盘前应保留足够空间并在完成后清理临时 `.bak` 镜像；可在“客机系统权限”自动检查中的“普通账户隔离与自动登录”项确认是否残留该键，若已开启且非预期需由管理员移除该键后再重启。
+6. **节点偶发超时与多跳链路波动排查：**  
+   如遇 `ipv4.icanhazip.com` 等出口检查偶发 5 秒超时，而宿主机代理可正常连通，往往是“中转节点 + 固定出口（如 AnyTLS / VLESS）”其中一跳首包丢包。可在终端或代理面板对各个中转节点做多轮连续延迟测试，识别偶发超时的中转跳（如单轮报错的节点），切到连续多轮均稳定的中转后再执行联网复检。
+
+## 提交问题时提供什么
+
 在 [GitHub Issues](https://github.com/Lee-xeo/Claude-Cage/issues) 提供 Cage 版本、操作系统版本、处理器架构、操作步骤、期望结果、实际错误及发生阶段。可以附裁剪后的状态截图或经过检查的诊断包。
 
 不要上传整个 `~/.claude-cage/`、完整代理配置、订阅链接、账户令牌、授权 URL、项目内容或未检查的诊断输出。网络报告可能包含出口 IP，截图也可能包含项目路径，分享前请按需要遮盖。涉及凭据泄露或隔离绕过的问题，请先使用仓库提供的私密安全报告入口。

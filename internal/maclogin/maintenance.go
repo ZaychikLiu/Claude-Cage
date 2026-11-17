@@ -26,10 +26,14 @@ type maintenanceWindow struct {
 	BlockingPID     int32      `json:"blocking_pid,omitempty"`
 	BlockingWindow  uint32     `json:"blocking_window,omitempty"`
 	BlockingBundle  string     `json:"blocking_bundle,omitempty"`
+	BlockingName    string     `json:"blocking_name,omitempty"`
 	PasswordFocused bool       `json:"password_focused"`
 }
 
-var maintenanceBundleID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.-]{0,127}$`)
+var (
+	maintenanceBundleID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.-]{0,127}$`)
+	maintenanceOwner    = regexp.MustCompile(`^[\p{L}\p{N} ._-]{1,64}$`)
+)
 
 func (w maintenanceWindow) probeMessage() string {
 	var message string
@@ -51,12 +55,21 @@ func (w maintenanceWindow) probeMessage() string {
 		if detail == "com.apple.notificationcenterui" {
 			detail = "通知中心"
 		}
+	} else if name := strings.TrimSpace(w.BlockingName); maintenanceOwner.MatchString(name) {
+		detail = name
 	}
 	if w.BlockingPID > 0 {
 		detail += fmt.Sprintf(" PID %d", w.BlockingPID)
 	}
 	if w.BlockingWindow > 0 {
 		detail += fmt.Sprintf(" 窗口 %d", w.BlockingWindow)
+	}
+	lowerName := strings.ToLower(w.BlockingName)
+	if w.Error == "maintenance_window_obscured" && (w.BlockingBundle == "com.apple.screencaptureui" || strings.Contains(lowerName, "screencapture")) {
+		if detail != "" {
+			message += "（" + strings.TrimSpace(detail) + "）"
+		}
+		return message + "，可能是客机截图选区未关闭；请先切回原生「屏幕共享」按一次 Esc 取消截图框，再重新打开客机授权设置"
 	}
 	if detail != "" {
 		message += "（" + strings.TrimSpace(detail) + "）"

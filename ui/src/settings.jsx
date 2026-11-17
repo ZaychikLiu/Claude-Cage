@@ -625,15 +625,7 @@ export function SettingsPanel({
                 </p>
                 {!status.storage_recovery?.required && <EnvironmentVersions status={status} onConfirm={onConfirm} />}
                 {!status.storage_recovery?.required && <EnvironmentCache status={status} onConfirm={onConfirm} />}
-                {status.guest_system === "macos" && <section aria-label="客机系统权限">
-                  <h4>客机系统权限</h4>
-                  <p className="field-help">在受限的客机系统设置窗口中完成授权，Cage 会自动检查并重新连接项目。</p>
-                  <div className="project-recovery-actions">
-                    <MacOSLogin maintenance="projects" label="文件共享权限" disabled={!status.ready || busy} />
-                    <MacOSLogin maintenance="screen" label="屏幕录制权限" disabled={!status.ready || busy} />
-                    <MacOSLogin maintenance="input" label="辅助功能权限" disabled={!status.ready || busy} />
-                  </div>
-                </section>}
+                {status.guest_system === "macos" && <MacOSPermissionsSettings ready={status.ready} busy={busy} onError={setError} />}
                 {status.guest_system === "macos" && !isRemoteClient() && <MacOSScreenSharingSettings disabled={!status.ready || busy} onError={setError} />}
                 {!status.storage_recovery?.required && <ResourceSettings status={status} onConfirm={onConfirm} onDirtyChange={setResourceDirty} />}
  <DiagnosticSettings />
@@ -722,6 +714,52 @@ export function SettingsPanel({
             </>
           </footer>
         )}
+      </div>
+    </section>
+  );
+}
+
+function MacOSPermissionsSettings({ ready, busy, onError }) {
+  const [checking, setChecking] = useState(false);
+  const [permStatus, setPermStatus] = useState(null);
+  async function check() {
+    if (!ready) return;
+    setChecking(true);
+    onError("");
+    try {
+      setPermStatus(await api("/macos/permissions", {}));
+    } catch (error) {
+      onError(error.message);
+    } finally {
+      setChecking(false);
+    }
+  }
+  useEffect(() => {
+    if (!ready) return;
+    let live = true;
+    setChecking(true);
+    api("/macos/permissions", {})
+      .then((result) => { if (live) setPermStatus(result); })
+      .catch(() => {})
+      .finally(() => { if (live) setChecking(false); });
+    return () => { live = false; };
+  }, [ready]);
+  const admin = permStatus?.administrator || "cageprovision";
+  return (
+    <section aria-label="客机系统权限">
+      <h4>客机系统权限</h4>
+      <p className="field-help">
+        客机日常账户故意设为普通用户（非管理员）；不要在原生屏幕共享里猜密码。点击下方按钮在 Cage 维护窗口授权，遇到管理员弹窗时用户名填 <code>{admin}</code>，选中密码框后点顶部「填写管理员密码」。若更新或重编 Cage 后仍提示未授权（即使开关看起来已开），请在权限列表先选中 <code>Cage Guest Window</code> 点「-」删除旧项，再点「+」从 <code>/Applications/Cage Guest Window.app</code> 重新添加；若提示被截屏遮挡（<code>screencapture</code>），切回原生屏幕共享按一次 <code>Esc</code>。
+      </p>
+      <ScreenSharingChecks status={permStatus} ariaLabel="客机系统权限检查结果" />
+      <div className="project-recovery-actions">
+        <button type="button" className="text-button" disabled={!ready || busy || checking} onClick={() => void check()}>
+          {checking ? <LoaderCircle size={14} className="spin" /> : null}
+          重新检查客机权限
+        </button>
+        <MacOSLogin maintenance="projects" label="文件共享权限" disabled={!ready || busy} onSessionClosed={() => void check()} />
+        <MacOSLogin maintenance="screen" label="屏幕录制权限" disabled={!ready || busy} onSessionClosed={() => void check()} />
+        <MacOSLogin maintenance="input" label="辅助功能权限" disabled={!ready || busy} onSessionClosed={() => void check()} />
       </div>
     </section>
   );

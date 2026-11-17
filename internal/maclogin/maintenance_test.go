@@ -138,6 +138,10 @@ func TestMaintenanceProbeDistinguishesBlockedWindow(t *testing.T) {
 	if message := w.probeMessage(); !strings.Contains(message, "通知中心 PID 42 窗口 7") {
 		t.Fatal(message)
 	}
+	capture := maintenanceWindow{Error: "maintenance_window_obscured", BlockingPID: 11645, BlockingWindow: 157, BlockingName: "screencapture"}
+	if message := capture.probeMessage(); !strings.Contains(message, "screencapture PID 11645 窗口 157") || !strings.Contains(message, "Esc") {
+		t.Fatal(message)
+	}
 	w.BlockingBundle = "unexpected\nwindow title"
 	if strings.Contains(w.probeMessage(), "unexpected") {
 		t.Fatal("invalid bundle identifier reported")

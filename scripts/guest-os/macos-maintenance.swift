@@ -112,13 +112,14 @@ enum MacMaintenance {
         }
         if !verified(front) {
             return ["error": "maintenance_foreground_changed", "blocking_pid": front.processIdentifier,
-                    "blocking_bundle": front.bundleIdentifier ?? ""]
+                    "blocking_bundle": front.bundleIdentifier ?? "",
+                    "blocking_name": front.localizedName ?? ""]
         }
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
             throw Failure(7, "maintenance_window_unavailable")
         }
         let display = CGDisplayBounds(CGMainDisplayID())
-        var covering: [(bounds: CGRect, pid: Int32?, window: UInt32?)] = []
+        var covering: [(bounds: CGRect, pid: Int32?, window: UInt32?, name: String?)] = []
         for window in windows {
             guard let raw = window[kCGWindowBounds as String] as? [String: Any],
                   let bounds = CGRect(dictionaryRepresentation: raw as CFDictionary), bounds.width > 0, bounds.height > 0,
@@ -138,9 +139,11 @@ enum MacMaintenance {
                     throw Failure(7, "maintenance_foreground_changed")
                 }
                 if let blocker = covering.first(where: { $0.bounds.intersects(region) }) {
-                    let bundle = blocker.pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
+                    let app = blocker.pid.flatMap { NSRunningApplication(processIdentifier: $0) }
+                    let bundle = app?.bundleIdentifier ?? ""
+                    let name = (blocker.name?.isEmpty == false ? blocker.name : app?.localizedName) ?? ""
                     return ["error": "maintenance_window_obscured", "blocking_pid": blocker.pid ?? 0,
-                            "blocking_window": blocker.window ?? 0, "blocking_bundle": bundle ?? ""]
+                            "blocking_window": blocker.window ?? 0, "blocking_bundle": bundle, "blocking_name": name]
                 }
                 return ["version": 1, "session": session, "user": NSUserName(), "pid": target.processIdentifier,
                     "window": id, "bundle": target.bundleIdentifier!,
@@ -159,7 +162,8 @@ enum MacMaintenance {
                     continue
                 }
                 #endif
-                covering.append((bounds, owner, window[kCGWindowNumber as String] as? UInt32))
+                let ownerName = window[kCGWindowOwnerName as String] as? String
+                covering.append((bounds, owner, window[kCGWindowNumber as String] as? UInt32, ownerName))
             }
         }
         throw Failure(7, "maintenance_window_unavailable")

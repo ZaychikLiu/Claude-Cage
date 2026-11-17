@@ -39,13 +39,13 @@ export function MacOSScreenSharingButton({
   );
 }
 
-export function ScreenSharingChecks({ checks = [], summary, status }) {
+export function ScreenSharingChecks({ checks = [], summary, status, ariaLabel = "屏幕共享检查结果" }) {
   const items = checks.length ? checks : status?.checks || [];
   const text = summary || status?.summary;
   if (!text && items.length === 0) return null;
   return <>
     {text && <p role="status">{text}</p>}
-    {items.length > 0 && <ol className="initialization-checks" aria-label="屏幕共享检查结果">
+    {items.length > 0 && <ol className="initialization-checks" aria-label={ariaLabel}>
       {items.map(check => <li key={check.id}>
         <strong>{check.title} · {labels[check.state] || "尚未完成"}</strong>
         <p>{check.evidence}</p>

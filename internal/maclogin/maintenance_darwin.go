@@ -216,12 +216,13 @@ function runProbe(passwordMode) {
   if (front.isNil()) return { error: errPrefix + "foreground_changed" };
   const frontPID = front.processIdentifier;
   const frontBundle = ObjC.unwrap(front.bundleIdentifier) || "";
+  const frontName = ObjC.unwrap(front.localizedName) || "";
   const frontPath = front.bundleURL.isNil() ? "" : ObjC.unwrap(front.bundleURL.path);
   const allowedApps = passwordMode
     ? ["com.apple.systempreferences", "com.apple.authorizationhost"]
     : ["com.apple.systempreferences", "com.apple.authorizationhost", "com.apple.UserNotificationCenter"];
   if (!allowedApps.includes(frontBundle) || !codesignOK(frontPID, frontPath, frontBundle)) {
-    return { error: errPrefix + "foreground_changed", blocking_pid: frontPID, blocking_bundle: frontBundle };
+    return { error: errPrefix + "foreground_changed", blocking_pid: frontPID, blocking_bundle: frontBundle, blocking_name: frontName };
   }
   const disp = $.CGDisplayBounds($.CGMainDisplayID());
   const dx = disp.origin.x, dy = disp.origin.y, dw = disp.size.width, dh = disp.size.height;
@@ -244,11 +245,13 @@ function runProbe(passwordMode) {
     const layer = Number(ObjC.unwrap(d.objectForKey("kCGWindowLayer")));
     const oApp = $.NSRunningApplication.runningApplicationWithProcessIdentifier(owner);
     const oBid = oApp.isNil() ? "" : (ObjC.unwrap(oApp.bundleIdentifier) || "");
+    const oNameRaw = d.objectForKey("kCGWindowOwnerName");
+    const oName = (!oNameRaw.isNil() && ObjC.unwrap(oNameRaw)) || (oApp.isNil() ? "" : (ObjC.unwrap(oApp.localizedName) || ""));
     const oPath = oApp.isNil() || oApp.bundleURL.isNil() ? "" : ObjC.unwrap(oApp.bundleURL.path);
     const fullDisp = bx === dx && by === dy && bw === dw && bh === dh;
     const isCompositor = layer > 0 && fullDisp && ((oBid === "com.apple.dock" && layer === 20) || (oBid === "com.apple.notificationcenterui" && layer === 23)) && codesignOK(owner, oPath, oBid);
     const isCursor = !oBid && layer >= 2147483600 && bw <= 64 && bh <= 64;
-    windows.push({ x: bx, y: by, w: bw, h: bh, pid: owner, win: winID, layer, bundle: oBid, path: oPath, systemSurface: isCompositor || isCursor });
+    windows.push({ x: bx, y: by, w: bw, h: bh, pid: owner, win: winID, layer, bundle: oBid, name: oName, path: oPath, systemSurface: isCompositor || isCursor });
   }
   if (!passwordMode) {
     const covering = [];
@@ -261,7 +264,7 @@ function runProbe(passwordMode) {
         if (rw < 80 || rh < 40) return { error: "maintenance_window_unavailable" };
         for (const c of covering) {
           if (c.x < rx + rw && c.x + c.w > rx && c.y < ry + rh && c.y + c.h > ry) {
-            return { error: "maintenance_window_obscured", blocking_pid: c.pid, blocking_window: c.win, blocking_bundle: c.bundle };
+            return { error: "maintenance_window_obscured", blocking_pid: c.pid, blocking_window: c.win, blocking_bundle: c.bundle, blocking_name: c.name };
           }
         }
         return { version: 1, session, user, pid: w.pid, window: w.win, bundle: w.bundle, password_focused: false, rect: [rx, ry, rw, rh], display: [dx, dy, dw, dh] };

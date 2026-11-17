@@ -18,8 +18,8 @@ import "./macos-claude-window.css";
 
 const messages = {
   requires_gui_login: "请先登录并解锁虚拟 Mac 的图形账户。",
-  screen_recording_permission: "请在虚拟 Mac 的系统授权中，允许 Cage Guest Window 录制屏幕。",
-  accessibility_permission: "要操作窗口，请允许虚拟 Mac 中的 Cage Guest Window 使用辅助功能。",
+  screen_recording_permission: "请在虚拟 Mac 的系统授权中允许 Cage Guest Window 录制屏幕（点击工具栏「屏幕录制权限设置」并用「填写管理员密码」授权；若开关看起来已开却无效，请先选中 Cage Guest Window 点「-」删旧项，再点「+」从 /Applications/Cage Guest Window.app 重加）。",
+  accessibility_permission: "要操作窗口，请允许虚拟 Mac 中的 Cage Guest Window 使用辅助功能（点击工具栏「辅助功能权限设置」并用「填写管理员密码」授权；若重编或更新 Cage 后仍无效，请先「-」删旧项再「+」重加 /Applications/Cage Guest Window.app）。",
   not_running: "请打开虚拟 Mac 中的应用。",
   no_visible_window: "应用尚未显示窗口，请重新打开应用。",
   identity_error: "虚拟 Mac 中的应用未通过签名检查。",
@@ -325,7 +325,9 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
       {!browser && <input ref={picker} type="file" multiple hidden aria-label="选择 Claude 附件" onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void receive({ files, kind: "paste" }, pickerTarget.current || undefined).catch(fileFailure); }} />}
       {(!state?.running || (!image && error)) && <button onClick={() => action("launch")} disabled={!state?.installed}>{state?.running ? "重新连接应用" : "打开应用"}</button>}
       {state?.installed && !state.screen && <button onClick={() => action("request-screen")}>授权窗口画面</button>}
+      {state?.installed && !state.screen && <MacOSLogin maintenance="screen" label="屏幕录制权限设置" onSessionClosed={() => refresh(n => n + 1)} />}
       {state?.installed && !state.input && <button onClick={() => action("request-input")}>授权键鼠</button>}
+      {state?.installed && !state.input && <MacOSLogin maintenance="input" label="辅助功能权限设置" onSessionClosed={() => refresh(n => n + 1)} />}
     </DesktopToolbar>
     {!image && error && <p role="alert">{error}</p>}
     {!image && fileError && <p role="alert">{fileError}</p>}
