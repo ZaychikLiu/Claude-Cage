@@ -320,7 +320,8 @@ function App() {
       setActive: active => { window.cageSharedClipboardActive = active; },
     });
     window.cageSyncClipboard = () => clipboard.sync();
-    return () => { clipboard.dispose(); delete window.cageSyncClipboard; };
+    window.cagePollClipboard = () => { void clipboard.poll().catch(() => {}); };
+    return () => { clipboard.dispose(); delete window.cageSyncClipboard; delete window.cagePollClipboard; };
   }, [status?.ready, clipboardAvailable, clipboardConnection]);
   const desktopFiles = useDesktopFiles(Boolean(status?.ready && desktopAvailable), notify, desktopOpen && !settingsOpen && !managementPage && !storageRecovery && windowVisible, windowVisible);
   const downloads = [...(browser.downloads || []), ...desktopFiles.downloads];

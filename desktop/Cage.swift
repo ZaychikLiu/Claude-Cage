@@ -30,6 +30,9 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
     private var clipboardReleasing = Set<String>()
     private var clipboardCacheLoaded = false
     private var clipboardCacheTimer: Timer?
+    private var clipboardWatchTimer: Timer?
+    private var lastObservedClipboardRevision: Int?
+    private var backgroundActivity: NSObjectProtocol?
     private var loading: NSTextField!
     private var retry: NSButton!
     private var backdrop: NSVisualEffectView!
@@ -59,6 +62,12 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
         withExtendedLifetime(delegate) { app.run() }
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Keep the background workbench and WKWebView clipboard bridge responsive
+        // even when the main window is closed or covered by Screen Sharing.
+        backgroundActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "Keep Cage guest session and shared clipboard active"
+        )
         let appearance = UserDefaults.standard.dictionary(forKey: "cage.windowAppearance") ?? [:]
         let mode = appearance["mode"] as? String ?? "system"
         NSApp.appearance = mode == "system" ? nil : NSAppearance(named: mode == "dark" ? .darkAqua : .aqua)
@@ -284,9 +293,24 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
         fileCommand(["clipboard-files", "--json", "cache", request], replyLimit: 30 << 20, seconds: 10, reply: reply)
     }
     private func watchClipboardCaches() {
-        guard clipboardCacheTimer == nil else { return }
-        clipboardCacheTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.collectClipboardCaches() }
-        restoreClipboardCaches()
+        if clipboardCacheTimer == nil {
+            let cacheTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.collectClipboardCaches() }
+            RunLoop.main.add(cacheTimer, forMode: .common)
+            clipboardCacheTimer = cacheTimer
+            restoreClipboardCaches()
+        }
+        if clipboardWatchTimer == nil {
+            lastObservedClipboardRevision = NSPasteboard.general.changeCount
+            let watchTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.pollWebViewClipboardIfChanged() }
+            RunLoop.main.add(watchTimer, forMode: .common)
+            clipboardWatchTimer = watchTimer
+        }
+    }
+    private func pollWebViewClipboardIfChanged() {
+        let count = NSPasteboard.general.changeCount
+        guard count != lastObservedClipboardRevision else { return }
+        lastObservedClipboardRevision = count
+        webView?.evaluateJavaScript("window.cagePollClipboard?.()", completionHandler: nil)
     }
     private func restoreClipboardCaches() {
         clipboardCacheCommand("list") { result, _ in
@@ -495,6 +519,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
                 } else { replyHandler(nil,"剪贴板内容格式或大小无效"); return }
                 guard written else { replyHandler(nil,"剪贴板写入失败"); return }
                 if !cache.isEmpty { self.clipboardCacheCommand("publish", id: cache) { _, _ in } }
+                self.lastObservedClipboardRevision = board.changeCount
                 replyHandler(["revision":board.changeCount],nil)
             }
             if let id = body["files"] as? String, UUID(uuidString:id) != nil {
@@ -668,6 +693,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
         guard window != nil, webView != nil else { return }
         let visible = !forceHidden && window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
         webView.evaluateJavaScript("window.cageWindowVisible = \(visible ? "true" : "false"); window.dispatchEvent(new Event('cage-window-visibility'));", completionHandler: nil)
+        if visible { webView.evaluateJavaScript("window.cagePollClipboard?.()", completionHandler: nil) }
     }
     func windowDidChangeOcclusionState(_ notification: Notification) { publishWindowVisibility() }
     func windowDidMiniaturize(_ notification: Notification) { publishWindowVisibility() }
@@ -677,7 +703,15 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
     func applicationDidUnhide(_ notification: Notification) { publishWindowVisibility() }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { window.makeKeyAndOrderFront(nil); publishWindowVisibility(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { appUpdater?.cancelForTermination() }
+    func applicationWillTerminate(_ notification: Notification) {
+        clipboardCacheTimer?.invalidate(); clipboardCacheTimer = nil
+        clipboardWatchTimer?.invalidate(); clipboardWatchTimer = nil
+        if let activity = backgroundActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            backgroundActivity = nil
+        }
+        appUpdater?.cancelForTermination()
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if allowQuit || webView.isHidden || appUpdater?.awaitingInitialWorkbench == true {
             if appUpdater?.prepareForTermination({ NSApp.reply(toApplicationShouldTerminate: true) }) == true { return .terminateLater }

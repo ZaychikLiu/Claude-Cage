@@ -498,13 +498,21 @@ private final class ClipboardAgent: @unchecked Sendable {
             case "copy-read":
                 try writeAll(fd, jsonData(copiedText(request)))
             case "stream":
+                // Keep idle clipboard streams open instead of dropping after 30m of inactivity.
+                var noTimeout = timeval(tv_sec: 0, tv_usec: 0)
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &noTimeout, socklen_t(MemoryLayout.size(ofValue: noTimeout)))
                 let connection = Stream(fd)
                 stream = connection
                 onGUI { streams[fd] = connection }
                 try connection.send(onGUI { hello() })
                 while let line = try reader.line() {
                     do {
-                        let reply = try apply(json(line), echo: false)
+                        let message = try json(line)
+                        if let serial = message["ping"] as? Int {
+                            try connection.send(["ack": serial])
+                            continue
+                        }
+                        let reply = try apply(message, echo: false)
                         onGUI { connection.initialized = true }
                         try connection.send(reply)
                     } catch { try connection.send(["error": (error as? ClipboardFailure)?.reason ?? "clipboard_write_failed"]) }
@@ -717,6 +725,8 @@ private func testAgentTransport(_ board: NSPasteboard) throws {
             try writeAll(fd, jsonData(["operation": "stream"]))
             guard let first = try reader.line(), let hello = try json(first)["hello"] as? [String: Any],
                   hello["os"] as? String == "darwin", hello["available"] as? Bool == true else { throw ClipboardFailure("test_hello_failed") }
+            try writeAll(fd, jsonData(["ping": 8]))
+            guard let pingAck = try reader.line(), try json(pingAck)["ack"] as? Int == 8 else { throw ClipboardFailure("test_ping_failed") }
             try writeAll(fd, jsonData(["text": "stream text 中文", "serial": 9]))
             guard let acknowledged = try reader.line(), try json(acknowledged)["ack"] as? Int == 9 else { throw ClipboardFailure("test_ack_failed") }
             onGUI { board.clearContents(); board.setString("guest pushed text", forType: .string); agent.poll() }
