@@ -247,7 +247,11 @@ func (s *Server) syncMacOSRegion(ctx context.Context, cfg cage.Config) error {
 	defer cancel()
 	s.setMessage("正在应用 macOS 客机账户的地区与语言…")
 	locale := strings.TrimSuffix(cfg.Locale, ".UTF-8")
-	cmd := shellescape.QuoteCommand([]string{"/bin/bash", "-c", macOSLocaleScript, "cage-locale", "NSGlobalDomain", locale})
+	args := []string{"/bin/bash", "-c", macOSLocaleScript, "cage-locale", "NSGlobalDomain", locale}
+	if cfg.BrowserLanguage != "" {
+		args = append(args, cfg.BrowserLanguage)
+	}
+	cmd := shellescape.QuoteCommand(args)
 	if _, err := s.guest(ctx, "exec "+cmd); err != nil {
 		return fmt.Errorf("macOS 客机已启动，未能写入客机账户的地区与语言：%w", err)
 	}

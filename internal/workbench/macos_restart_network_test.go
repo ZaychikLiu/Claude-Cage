@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -172,5 +173,90 @@ func TestMacOSStartAndControllerReconnectRequireFreshNetworkCheck(t *testing.T) 
 				t.Fatalf("ready=%t mode=%s paused=%t generation=%d", s.ready, state.Mode, s.networkPaused, s.safety.pauseVersion)
 			}
 		})
+	}
+}
+
+func TestMacOSLocaleSyncsBrowserPreferences(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("uses native macOS defaults and osascript")
+	}
+	root := t.TempDir()
+	domain := filepath.Join(root, "regional-preferences")
+	profile := filepath.Join(root, "Cage", "Browser")
+	runLocale := func(locale, browserLang string) {
+		t.Helper()
+		out, err := exec.Command("/bin/bash", "-c", macOSLocaleScript, "cage-locale", domain, locale, browserLang, profile).CombinedOutput()
+		if err != nil {
+			t.Fatalf("macos-locale failed: %v\n%s", err, out)
+		}
+	}
+
+	// Creates Default/Preferences on a brand-new profile directory.
+	runLocale("en_US", "en-US")
+	defaultPrefs := filepath.Join(profile, "Default", "Preferences")
+	raw, err := os.ReadFile(defaultPrefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Intl map[string]any `json:"intl"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Intl["accept_languages"] != "en-US" || parsed.Intl["selected_languages"] != "en-US" {
+		t.Fatalf("unexpected default intl: %#v", parsed.Intl)
+	}
+
+	// Repairs drifted active profile from Local State without clobbering unrelated keys.
+	if err := os.MkdirAll(filepath.Join(profile, "Profile 2"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profile, "Local State"), []byte(`{"profile":{"last_used":"Profile 2"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p2Prefs := filepath.Join(profile, "Profile 2", "Preferences")
+	if err := os.WriteFile(p2Prefs, []byte(`{"intl":{"accept_languages":"en","selected_languages":"en-US,en","extra":"keep"},"unrelated":{"keep":true,"zh":"测试","nil":null}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runLocale("ja_JP", "ja-JP")
+	raw, err = os.ReadFile(p2Prefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated struct {
+		Intl      map[string]any `json:"intl"`
+		Unrelated map[string]any `json:"unrelated"`
+	}
+	if err := json.Unmarshal(raw, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Intl["accept_languages"] != "ja-JP" || updated.Intl["selected_languages"] != "ja-JP" || updated.Intl["extra"] != "keep" {
+		t.Fatalf("unexpected repaired intl: %#v", updated.Intl)
+	}
+	if updated.Unrelated["keep"] != true || updated.Unrelated["zh"] != "测试" || updated.Unrelated["nil"] != nil {
+		t.Fatalf("unrelated keys mutated: %#v", updated.Unrelated)
+	}
+	if _, exists := updated.Unrelated["nil"]; !exists {
+		t.Fatalf("nil key dropped: %s", raw)
+	}
+	info, err := os.Stat(p2Prefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("prefs mode = %o, want 0600", info.Mode().Perm())
+	}
+
+	// Idempotent no-op when Preferences already matches.
+	beforeMod := info.ModTime()
+	time.Sleep(20 * time.Millisecond)
+	runLocale("ja_JP", "ja-JP")
+	afterInfo, err := os.Stat(p2Prefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterInfo.ModTime().Equal(beforeMod) {
+		t.Fatalf("matching Preferences rewritten unnecessarily: before=%v after=%v", beforeMod, afterInfo.ModTime())
 	}
 }
