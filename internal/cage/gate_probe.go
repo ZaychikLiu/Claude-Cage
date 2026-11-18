@@ -14,12 +14,29 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/usererror"
 )
+
+// ErrExitProbeTransient marks transient exit-probe transport drops such as
+// premature EOF or connection resets during an otherwise valid proxy lease.
+var ErrExitProbeTransient = errors.New("exit probe transient failure")
+
+func isTransientExitProbeError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var networkError net.Error
+	return errors.Is(err, context.DeadlineExceeded) ||
+		(errors.As(err, &networkError) && networkError.Timeout()) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET)
+}
 
 //go:embed browser-check.html
 var browserCheckPage []byte
@@ -41,6 +58,7 @@ func probeExitIP(ctx context.Context, e *Egress) (string, error) {
 	// The proxy resolves this name remotely. An IPv4-only service measures the
 	// same address family as the guest policy even when the proxy is dual-stack.
 	allTimedOut := true
+	allTransient := true
 	var failures []string
 	for _, service := range []struct{ id, name, endpoint string }{
 		{"icanhazip", "主检测服务", "https://ipv4.icanhazip.com/"},
@@ -58,6 +76,9 @@ func probeExitIP(ctx context.Context, e *Egress) (string, error) {
 		if !errors.Is(err, context.DeadlineExceeded) && !(errors.As(err, &networkError) && networkError.Timeout()) {
 			allTimedOut = false
 		}
+		if !isTransientExitProbeError(err) {
+			allTransient = false
+		}
 		if ctx.Err() != nil {
 			break
 		}
@@ -67,6 +88,9 @@ func probeExitIP(ctx context.Context, e *Egress) (string, error) {
 	}
 	if allTimedOut {
 		return "", usererror.New("通过所选代理查询出口 IP", strings.Join(failures, "；"), "出口检测超时，请稍后重试。", context.DeadlineExceeded)
+	}
+	if allTransient {
+		return "", usererror.New("通过所选代理查询出口 IP", strings.Join(failures, "；"), "出口检测连接暂时中断，请稍后重试。", ErrExitProbeTransient)
 	}
 	return "", errors.New("通过所选代理查询出口 IP 失败：" + strings.Join(failures, "；") + "。未能确认出口时，外网保持关闭。")
 }

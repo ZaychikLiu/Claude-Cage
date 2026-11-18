@@ -21,13 +21,15 @@ func TestExitProbeTimeoutKeepsExistingLeaseWithoutRenewing(t *testing.T) {
 	s.safety.VerifiedAt = time.Now().Add(-time.Minute)
 	before := gate.Status()
 	verified := s.safety.VerifiedAt
-	for i := 0; i < 2; i++ {
-		s.monitorSafetyWithProbe(func(context.Context, cage.Config) (string, error) {
-			return "", context.DeadlineExceeded
-		})
-		after := gate.Status()
-		if after.Mode != cage.GateOpen || after.Until != before.Until || !s.safety.VerifiedAt.Equal(verified) {
-			t.Fatalf("timeout changed the existing lease: before=%+v after=%+v", before, after)
+	for _, probeErr := range []error{context.DeadlineExceeded, cage.ErrExitProbeTransient} {
+		for i := 0; i < 2; i++ {
+			s.monitorSafetyWithProbe(func(context.Context, cage.Config) (string, error) {
+				return "", probeErr
+			})
+			after := gate.Status()
+			if after.Mode != cage.GateOpen || after.Until != before.Until || !s.safety.VerifiedAt.Equal(verified) {
+				t.Fatalf("transient probe error (%v) changed the existing lease: before=%+v after=%+v", probeErr, before, after)
+			}
 		}
 	}
 	client, err := s.gateClient()
@@ -330,5 +332,53 @@ func TestConfigurationMismatchDoesNotScheduleRecovery(t *testing.T) {
 	s.finishSafetyObservation(context.Background(), client, state, "", "guest observation timed out", true)
 	if s.recovery.RunID != "" || gate.Status().Mode != cage.GateClosed {
 		t.Fatal("configuration change got transient recovery")
+	}
+}
+
+func TestManualRecheckTransientFailureRearmsRecovery(t *testing.T) {
+	if recoverableSafetyCheckReport(cage.SafetyReport{}) {
+		t.Fatal("empty report should not be recoverable")
+	}
+	nonCriticalOnly := cage.SafetyReport{
+		Checks: []cage.SafetyCheck{
+			{ID: "egress_policy", Critical: true, State: cage.CheckPassed},
+			{ID: "third_party_reputation", Critical: false, State: cage.CheckUnknown},
+		},
+	}
+	if recoverableSafetyCheckReport(nonCriticalOnly) {
+		t.Fatal("non-critical unknown should not trigger recovery")
+	}
+	withFailure := cage.SafetyReport{
+		Checks: []cage.SafetyCheck{
+			{ID: "proxy_transport", Critical: true, State: cage.CheckUnknown},
+			{ID: "browser_settings", Critical: true, State: cage.CheckFailed},
+		},
+	}
+	if recoverableSafetyCheckReport(withFailure) {
+		t.Fatal("hard policy failure must not trigger automatic recovery")
+	}
+	transientOnly := cage.SafetyReport{
+		Checks: []cage.SafetyCheck{
+			{ID: "egress_policy", Critical: true, State: cage.CheckPassed},
+			{ID: "proxy_transport", Critical: true, State: cage.CheckUnknown},
+			{ID: "exit_consistency", Critical: true, State: cage.CheckUnknown},
+		},
+	}
+	if !recoverableSafetyCheckReport(transientOnly) {
+		t.Fatal("expected CheckUnknown-only report to be recoverable")
+	}
+
+	s, gate := failedMonitoringServer(t)
+	if err := gate.BeginCheck(); err != nil {
+		t.Fatal(err)
+	}
+	gate.Close("联网检查未通过：终端检测通道未能确认。")
+	closed := gate.Status()
+	if closed.Mode != cage.GateClosed || closed.Report == nil || closed.Epoch == s.recovery.Epoch {
+		t.Fatalf("expected closed gate with advanced epoch, got %+v", closed)
+	}
+	s.scheduleNetworkRecovery(closed)
+	if s.recovery.RunID != closed.RunID || s.recovery.Epoch != closed.Epoch || s.recovery.Configuration != closed.Configuration {
+		t.Fatalf("manual recheck transient failure did not re-arm recovery to new epoch: recovery=%+v closed=%+v", s.recovery, closed)
 	}
 }

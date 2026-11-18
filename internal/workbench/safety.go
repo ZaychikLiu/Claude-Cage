@@ -687,6 +687,7 @@ func (s *Server) runSafetyCheck() (returned error) {
 		_, _ = client.Close(context.Background(), "检测未启动，外网保持关闭")
 		return err
 	}
+	var report cage.SafetyReport
 	granted := false
 	defer func() {
 		s.safetyOp.Lock()
@@ -702,6 +703,12 @@ func (s *Server) runSafetyCheck() (returned error) {
 			closed, e := client.Close(context.Background(), reason)
 			if e == nil {
 				s.publishGate(closed)
+				s.mu.Lock()
+				inRecoveryJob := s.jobs.snapshot().Kind == "network-recovery"
+				s.mu.Unlock()
+				if !inRecoveryJob && ctx.Err() == nil && closed.Mode == cage.GateClosed && closed.Report != nil && closed.Configuration == cfg.Fingerprint() && recoverableSafetyCheckReport(report) {
+					s.scheduleNetworkRecovery(closed)
+				}
 			}
 		}
 		s.mu.Lock()
@@ -739,7 +746,7 @@ func (s *Server) runSafetyCheck() (returned error) {
 		}
 		s.publishGate(state)
 	}
-	report := cage.SafetyReport{Policy: cage.SafetyPolicyVersion, ID: randomToken()[:32], RunID: state.RunID, CheckID: state.CheckID, Configuration: cfg.Fingerprint(), CreatedAt: time.Now()}
+	report = cage.SafetyReport{Policy: cage.SafetyPolicyVersion, ID: randomToken()[:32], RunID: state.RunID, CheckID: state.CheckID, Configuration: cfg.Fingerprint(), CreatedAt: time.Now()}
 	defer func() {
 		// Preserve partial reports too: cancellation or a transport failure must
 		// not leave the last successful report as the only diagnostic evidence.
@@ -1186,7 +1193,7 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 		ip, err = probe(ctx, cfg)
 		timing.stage("exit_ip")
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && s.deferTimedOutExitProbe(ctx, client, state) {
+			if (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, cage.ErrExitProbeTransient)) && ctx.Err() == nil && s.deferTimedOutExitProbe(ctx, client, state) {
 				timing.result = "exit_timeout_retry"
 				return
 			}
@@ -1230,6 +1237,25 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 	}
 	s.finishSafetyObservation(ctx, client, state, ip, issue, recoverable)
 	timing.stage("finish_observation")
+}
+
+func recoverableSafetyCheckReport(report cage.SafetyReport) bool {
+	if len(report.Checks) == 0 {
+		return false
+	}
+	hasUnknown := false
+	for _, c := range report.Checks {
+		if !c.Critical {
+			continue
+		}
+		if c.State == cage.CheckFailed {
+			return false
+		}
+		if c.State == cage.CheckUnknown {
+			hasUnknown = true
+		}
+	}
+	return hasUnknown
 }
 
 // Keep the already granted lease unchanged while retrying a timed-out exit

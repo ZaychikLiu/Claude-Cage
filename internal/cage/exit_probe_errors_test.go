@@ -58,7 +58,7 @@ func TestExitProbeProxyFailureKeepsServiceAndHTTPStatusAfterRedaction(t *testing
 	cfg := DefaultConfig()
 	cfg.ProxyURL = strings.Replace(proxy.URL, "://", "://private-user:private-password@", 1)
 	ip, err := ProbeExitIP(context.Background(), cfg)
-	if ip != "" || err == nil || !strings.Contains(err.Error(), "HTTP 407") || errors.Is(err, context.DeadlineExceeded) {
+	if ip != "" || err == nil || !strings.Contains(err.Error(), "HTTP 407") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrExitProbeTransient) {
 		t.Fatalf("proxy rejection was hidden or treated as a timeout: %s %v", ip, err)
 	}
 	log, readErr := os.ReadFile(filepath.Join(profile, "logs", "events.jsonl"))
@@ -74,5 +74,32 @@ func TestExitProbeProxyFailureKeepsServiceAndHTTPStatusAfterRedaction(t *testing
 		if strings.Contains(err.Error(), private) || strings.Contains(string(log), private) {
 			t.Fatalf("private proxy data leaked: %v %s", err, log)
 		}
+	}
+}
+
+func TestExitProbeTransientEOFKeepsTransientSentinel(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("proxy server missing hijacker")
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = buf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		_ = buf.Flush()
+		_ = conn.Close()
+	}))
+	defer proxy.Close()
+	cfg := DefaultConfig()
+	cfg.ProxyURL = proxy.URL
+	ip, err := ProbeExitIP(context.Background(), cfg)
+	if ip != "" || !errors.Is(err, ErrExitProbeTransient) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("premature EOF did not preserve ErrExitProbeTransient: ip=%q err=%v", ip, err)
 	}
 }
