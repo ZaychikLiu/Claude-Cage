@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"compress/zlib"
@@ -11,9 +12,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -413,6 +417,21 @@ func (s *Server) clipboardArchive(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "剪贴板文件已过期，请重新复制", 404)
 			return
 		}
+		projectItems, guestPaths, err := s.splitMacOSClipboardExport(selection)
+		if err != nil {
+			http.Error(w, "读取剪贴板文件失败", 502)
+			return
+		}
+		if len(projectItems) > 0 {
+			w.Header().Set("Content-Type", "application/x-tar")
+			w.Header().Set("Trailer", "X-Cage-Clipboard-Status")
+			status := "failed"
+			if s.writeMixedClipboardArchive(ctx, w, projectItems, guestPaths, selection.User) == nil {
+				status = "ok"
+			}
+			w.Header().Set("X-Cage-Clipboard-Status", status)
+			return
+		}
 		// Export with the copying application's permissions. A URI written by
 		// a guest application cannot grant access to root-only files.
 		cmd, _, err := s.clipboardCommand(ctx, "export", selection)
@@ -514,6 +533,139 @@ func (s *Server) clipboardCopy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	jsonReply(w, result)
+}
+
+type macOSClipboardProjectItem struct {
+	hostRoot    string
+	relPath     string
+	archiveName string
+}
+
+func activeApprovedShare(share *projectShare) bool {
+	if share == nil || share.approval != "" || share.done == nil {
+		return false
+	}
+	select {
+	case <-share.done:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *Server) splitMacOSClipboardExport(selection clipboardFileSelection) ([]macOSClipboardProjectItem, []string, error) {
+	if s.macosGuest == nil || selection.User != "guest" {
+		return nil, selection.Paths, nil
+	}
+	projectsBase := pathpkg.Join("/Users", s.macosGuest.User, "Cage", "Projects")
+	hasProjectPath := false
+	for _, p := range selection.Paths {
+		if p == projectsBase || strings.HasPrefix(p, projectsBase+"/") {
+			hasProjectPath = true
+			break
+		}
+	}
+	if !hasProjectPath {
+		return nil, selection.Paths, nil
+	}
+	projects, err := s.projectPaths()
+	if err != nil {
+		return nil, nil, err
+	}
+	var projectItems []macOSClipboardProjectItem
+	var guestPaths []string
+	for _, p := range selection.Paths {
+		if p != projectsBase && !strings.HasPrefix(p, projectsBase+"/") {
+			guestPaths = append(guestPaths, p)
+			continue
+		}
+		if !pathpkg.IsAbs(p) || pathpkg.Clean(p) != p || strings.ContainsAny(p, "\x00\\") {
+			return nil, nil, errors.New("剪贴板文件路径无效")
+		}
+		matchedProject := ""
+		matchedRoot := ""
+		for _, project := range projects {
+			if project == "" || isClientMountPath(project) {
+				continue
+			}
+			root := strings.TrimRight(macOSProjectPath(s.macosGuest.User, project), "/")
+			if p == root || strings.HasPrefix(p, root+"/") {
+				matchedProject = project
+				matchedRoot = root
+				break
+			}
+		}
+		if matchedProject == "" {
+			return nil, nil, errors.New("只能访问已打开 Cage 项目中的文件")
+		}
+		s.mu.Lock()
+		share := s.projectShares[matchedProject]
+		s.mu.Unlock()
+		if !activeApprovedShare(share) {
+			return nil, nil, errors.New("剪贴板项目共享未就绪")
+		}
+		hostRoot, err := filepath.EvalSymlinks(matchedProject)
+		if err != nil {
+			return nil, nil, errors.New("项目目录无法访问")
+		}
+		st, err := os.Stat(hostRoot)
+		if err != nil || !st.IsDir() {
+			return nil, nil, errors.New("项目目录无效")
+		}
+		relPath := "."
+		archiveName := filepath.Base(hostRoot)
+		if p != matchedRoot {
+			sub := strings.TrimPrefix(p, matchedRoot+"/")
+			relPath = filepath.FromSlash(sub)
+			if !filepath.IsLocal(relPath) {
+				return nil, nil, errors.New("剪贴板文件路径无效")
+			}
+			archiveName = pathpkg.Base(p)
+		}
+		projectItems = append(projectItems, macOSClipboardProjectItem{
+			hostRoot:    hostRoot,
+			relPath:     relPath,
+			archiveName: archiveName,
+		})
+	}
+	return projectItems, guestPaths, nil
+}
+
+func (s *Server) writeMixedClipboardArchive(ctx context.Context, output io.Writer, projectItems []macOSClipboardProjectItem, guestPaths []string, user string) error {
+	tw := tar.NewWriter(output)
+	names := map[string]bool{}
+	for _, item := range projectItems {
+		root, err := os.OpenRoot(item.hostRoot)
+		if err != nil {
+			return err
+		}
+		err = clipboardfiles.AppendFromRoot(tw, root, item.relPath, item.archiveName, names)
+		_ = root.Close()
+		if err != nil {
+			return err
+		}
+	}
+	if len(guestPaths) > 0 {
+		cmd, _, err := s.clipboardCommand(ctx, "export", clipboardFileSelection{Paths: guestPaths, User: user})
+		if err != nil {
+			return err
+		}
+		out, err := cmd.StdoutPipe()
+		if err != nil || cmd.Start() != nil {
+			return errors.New("读取剪贴板文件失败")
+		}
+		streamErr := clipboardfiles.AppendTarStream(tw, out, names)
+		_, _ = io.Copy(io.Discard, out)
+		_ = out.Close()
+		waitErr := cmd.Wait()
+		if streamErr != nil {
+			return streamErr
+		}
+		if waitErr != nil {
+			return waitErr
+		}
+	}
+	return tw.Close()
 }
 
 func writeClipboardArchive(output io.Writer, paths []string) error {

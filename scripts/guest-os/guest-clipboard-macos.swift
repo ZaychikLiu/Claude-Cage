@@ -157,6 +157,34 @@ private func optionalPlainClipboardText(_ board: NSPasteboard) -> String? {
     return nil
 }
 
+private func isMountedProjectFile(_ path: String, home: String = FileManager.default.homeDirectoryForCurrentUser.path) -> Bool {
+    guard URL(fileURLWithPath: path).standardizedFileURL.path == path else { return false }
+    let base = URL(fileURLWithPath: home).appendingPathComponent("Cage/Projects").standardizedFileURL.path
+    guard path.hasPrefix(base + "/") else { return false }
+    let rest = String(path.dropFirst(base.count + 1))
+    let leaf = String(rest.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+    guard leaf.count == 24, leaf.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) else {
+        return false
+    }
+    let mountPoint = base + "/" + leaf
+    var fs = statfs()
+    guard statfs(mountPoint, &fs) == 0 else { return false }
+    let mountedOn = withUnsafePointer(to: &fs.f_mntonname) {
+        $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+    }
+    let fsType = withUnsafePointer(to: &fs.f_fstypename) {
+        $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) }
+    }
+    guard mountedOn == mountPoint, fsType == "macfuse", fs.f_owner == getuid(),
+          (fs.f_flags & UInt32(MNT_NOSUID | MNT_NODEV)) == UInt32(MNT_NOSUID | MNT_NODEV) else {
+        return false
+    }
+    var info = stat()
+    guard lstat(path, &info) == 0 else { return false }
+    let kind = info.st_mode & S_IFMT
+    return kind == S_IFREG || kind == S_IFDIR
+}
+
 private func boardContent(_ board: NSPasteboard) throws -> [String: Any] {
     if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
         guard urls.allSatisfy({ $0.isFileURL && ($0.host == nil || $0.host == "" || $0.host == "localhost") }) else { throw ClipboardFailure("invalid_files") }
@@ -283,16 +311,19 @@ private final class ClipboardAgent: @unchecked Sendable {
     private let board: NSPasteboard
     private let gui: () -> Bool
     private let diagnostic: (String) -> Void
+    private let isProjectFile: (String) -> Bool
     private var available: Bool
     private var revision: Int
     private var snapshotPending = false
     private var transfers: [UUID: Process] = [:]
     private let helper: URL
     init(board: NSPasteboard = .general, gui: @escaping () -> Bool = guiAvailable,
-         diagnostic: @escaping (String) -> Void = { GuestDiagnostic.record("clipboard", $0) }) {
+         diagnostic: @escaping (String) -> Void = { GuestDiagnostic.record("clipboard", $0) },
+         isProjectFile: @escaping (String) -> Bool = { isMountedProjectFile($0) }) {
         self.board = board
         self.gui = gui
         self.diagnostic = diagnostic
+        self.isProjectFile = isProjectFile
         available = gui()
         revision = board.changeCount
         helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/cage-guest-files")
@@ -421,13 +452,33 @@ private final class ClipboardAgent: @unchecked Sendable {
             try check(); return (session, board.changeCount, try boardContent(board))
         }
         var result = content
+        var copiedLocal: [String] = []
         if let selected = content["files"] as? [String] {
             onGUI { record(selected) }
-            // File snapshots are frozen in the GUI agent's readable cache.
-            result["files"] = try fileJSON("copy", values: selected)
+            var resolved = selected
+            var localIndices: [Int] = []
+            var localValues: [String] = []
+            for (index, item) in selected.enumerated() {
+                if !isProjectFile(item) {
+                    localIndices.append(index)
+                    localValues.append(item)
+                }
+            }
+            if !localValues.isEmpty {
+                // Non-project file snapshots are frozen in the GUI agent's readable cache.
+                // Mounted FSKit project files cannot be opened directly by the unscoped helper
+                // and are verified and streamed from the host controller instead.
+                let copied = try fileJSON("copy", values: localValues)
+                guard copied.count == localIndices.count else { throw ClipboardFailure("invalid_files") }
+                copiedLocal = copied
+                for (offset, index) in localIndices.enumerated() {
+                    resolved[index] = copied[offset]
+                }
+            }
+            result["files"] = resolved
         }
         do { try onGUI { try check(epoch); guard board.changeCount == captured else { throw ClipboardFailure("superseded") } } }
-        catch { if let files = result["files"] as? [String] { onGUI { retireCopies(files) } }; throw error }
+        catch { if !copiedLocal.isEmpty { onGUI { retireCopies(copiedLocal) } }; throw error }
         result["revision"] = captured
         result["source"] = "guest"
         return result
@@ -485,11 +536,15 @@ private final class ClipboardAgent: @unchecked Sendable {
         DispatchQueue.global(qos: .userInitiated).async {
             let result: [String: Any]
             do { result = try self.snapshot() }
-            catch { result = (error as? ClipboardFailure)?.reason == "superseded" ? [:] : ["error": (error as? ClipboardFailure)?.reason ?? "clipboard_read_failed"] }
+            catch {
+                let reason = (error as? ClipboardFailure)?.reason ?? "clipboard_read_failed"
+                if reason != "superseded" { self.diagnostic(reason) }
+                result = reason == "superseded" ? [:] : ["error": reason]
+            }
             onGUI {
                 self.snapshotPending = false
                 guard !result.isEmpty else { return }
-                let files = result["files"] as? [String] ?? []
+                let files = (result["files"] as? [String] ?? []).filter { !self.isProjectFile($0) }
                 let recipients = self.streams.values.filter { $0.initialized }
                 guard self.session == capturedSession, !recipients.isEmpty else { self.retireCopies(files); return }
                 let delivery = SnapshotDelivery(recipients.count)
@@ -715,7 +770,7 @@ private final class ClipboardTestState: @unchecked Sendable {
     var failure: Error?
 }
 
-private func testAgentTransport(_ board: NSPasteboard) throws {
+private func testAgentTransport(_ board: NSPasteboard, projectFile: @escaping (String) -> Bool = { _ in false }) throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("cage-clipboard-selftest-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     let previousTemp = getenv("TMPDIR").map { String(cString: $0) }
@@ -725,7 +780,7 @@ private func testAgentTransport(_ board: NSPasteboard) throws {
         try? FileManager.default.removeItem(at: root)
     }
     let state = ClipboardTestState()
-    let agent = ClipboardAgent(board: board, gui: { state.available }, diagnostic: { _ in })
+    let agent = ClipboardAgent(board: board, gui: { state.available }, diagnostic: { _ in }, isProjectFile: projectFile)
     let done = DispatchGroup()
     done.enter()
     DispatchQueue.global(qos: .userInitiated).async {
@@ -798,6 +853,18 @@ private func testAgentTransport(_ board: NSPasteboard) throws {
                 Thread.sleep(forTimeInterval: 0.01)
             }
             guard discarded["ok"] as? Bool == true, !FileManager.default.fileExists(atPath: duplicates[0]) else { throw ClipboardFailure("test_discard_failed") }
+            if projectFile("/Users/guest/Cage/Projects/0123456789abcdef01234567/deck.pdf") {
+                let simulated = "/Users/guest/Cage/Projects/0123456789abcdef01234567/deck.pdf"
+                onGUI {
+                    board.clearContents()
+                    _ = board.writeObjects([NSURL(fileURLWithPath: simulated)])
+                    agent.poll()
+                }
+                guard let pushedProject = try reader.line(),
+                      try json(pushedProject)["files"] as? [String] == [simulated] else {
+                    throw ClipboardFailure("test_project_passthrough_failed")
+                }
+            }
             onGUI { state.available = false; agent.poll() }
             guard try reader.line() == nil else { throw ClipboardFailure("test_old_session_survived") }
         } catch {
@@ -827,8 +894,9 @@ private func selfTest() throws {
     guard let encoded = actual["png"] as? String, let data = Data(base64Encoded: encoded), try image(data).width == 11 else { throw ClipboardFailure("image_test_failed") }
     do { try setBoard(board, ["png": "not-png"]); throw ClipboardFailure("invalid_image_accepted") } catch let error as ClipboardFailure { guard error.reason == "invalid_image" else { throw error } }
     do { _ = try paths(["/tmp/../escape"]); throw ClipboardFailure("invalid_files_accepted") } catch let error as ClipboardFailure { guard error.reason == "invalid_files" else { throw error } }
-    try testAgentTransport(board)
-    print("macOS clipboard: named pasteboard text/image, private socket stream, framed file upload, registered-file checks, cleanup and GUI-session revocation passed")
+    try testAgentTransport(board, projectFile: { _ in false })
+    try testAgentTransport(board, projectFile: { $0.hasPrefix("/Users/guest/Cage/Projects/") })
+    print("macOS clipboard: named pasteboard text/image, private socket stream, framed file upload, project path passthrough, registered-file checks, cleanup and GUI-session revocation passed")
 }
 
 @main

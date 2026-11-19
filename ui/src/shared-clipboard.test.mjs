@@ -413,3 +413,61 @@ test("an explicit paste gives up instead of waiting on a stuck snapshot", async 
     assert.ok(Date.now() - started < 7000);
   } finally { f.controller.dispose(); }
 });
+
+test("darwin guest file selection resolves Screen Sharing filename echo vs genuine host copy via native", async () => {
+  for (const scenario of ["echo-accepted", "host-superseded"]) {
+    const sent = [], writes = [], syncCalls = [], released = [];
+    let revision = 1, hostContent = { text: "host initial" };
+    const socket = { readyState: 1, send: text => {
+      const value = JSON.parse(text);
+      sent.push(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "serial" && key !== "basedOn")));
+      queueMicrotask(() => socket.onmessage({ data: JSON.stringify({ ack: value.serial }) }));
+    }, close() { this.readyState = 3; } };
+    const controller = shareClipboard({
+      connect: () => socket, interval: 60000, onStatus: () => {}, setActive: () => {},
+      native: async (action, value) => {
+        if (action === "clipboardRevision") return revision;
+        if (action === "clipboardSyncRead") return { ...hostContent, revision };
+        if (action === "clipboardSyncCancel") return;
+        if (action === "clipboardSyncRelease") { released.push(value.files); return; }
+        if (action === "clipboardSyncWrite") {
+          syncCalls.push(value);
+          if (scenario === "host-superseded") {
+            return { superseded: true, revision };
+          }
+          hostContent = { files: value.files };
+          writes.push(hostContent);
+          return { revision: ++revision };
+        }
+      },
+    });
+    try {
+      socket.onopen();
+      socket.onmessage({ data: JSON.stringify({ hello: { version: 1, os: "darwin", session: "mac-gui", formats: ["text", "png", "files"], available: true } }) });
+      await settle();
+      assert.deepEqual(sent, [{ text: "host initial" }]);
+
+      // Intervening revision bump before guest file notification lands.
+      revision++;
+      hostContent = { text: scenario === "host-superseded" ? "newer host text" : "deck.pdf" };
+      socket.onmessage({ data: JSON.stringify({ files: "project-deck" }) });
+      await settle(); await settle();
+
+      assert.equal(syncCalls.length, 1);
+      assert.equal(syncCalls[0].files, "project-deck");
+      assert.equal(syncCalls[0].revision, 1);
+      if (scenario === "echo-accepted") {
+        assert.deepEqual(writes, [{ files: "project-deck" }]);
+        const sentBefore = sent.length;
+        await controller.poll();
+        await settle();
+        assert.equal(sent.length, sentBefore);
+      } else {
+        assert.deepEqual(writes, []);
+        await settle();
+        assert.deepEqual(sent.at(-1), { text: "newer host text" });
+      }
+      assert.deepEqual(released, ["project-deck"]);
+    } finally { controller.dispose(); }
+  }
+});

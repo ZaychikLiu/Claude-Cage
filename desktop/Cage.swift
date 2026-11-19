@@ -34,6 +34,8 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
     private var lastObservedClipboardRevision: Int?
     private var lastAttemptedClipboardRevision: Int?
     private var lastAttemptedClipboardAt = Date.distantPast
+    private var lastGuestClipboardFileURLs: [URL]?
+    private var lastGuestClipboardFileAt = Date.distantPast
     private var backgroundActivity: NSObjectProtocol?
     private var loading: NSTextField!
     private var retry: NSButton!
@@ -330,9 +332,30 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             clipboardWatchTimer = watchTimer
         }
     }
+    private func isScreenSharingFilenameEcho(_ board: NSPasteboard, fileNames: [String]) -> Bool {
+        guard !fileNames.isEmpty else { return false }
+        let existingURLs = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard existingURLs.isEmpty else { return false }
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.ScreenSharing").isEmpty else { return false }
+        let plain = plainClipboardText(board)
+        return plain == fileNames.joined(separator: "\r") ||
+            plain == fileNames.joined(separator: "\n") ||
+            (plain.isEmpty && NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.ScreenSharing")
+    }
     private func pollWebViewClipboardIfChanged() {
-        let count = NSPasteboard.general.changeCount
+        let board = NSPasteboard.general
+        let count = board.changeCount
         guard count != lastObservedClipboardRevision else { return }
+        if let urls = lastGuestClipboardFileURLs,
+           Date().timeIntervalSince(lastGuestClipboardFileAt) < 2.0,
+           urls.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }),
+           isScreenSharingFilenameEcho(board, fileNames: urls.map(\.lastPathComponent)) {
+            board.clearContents()
+            if board.writeObjects(urls as [NSURL]) {
+                lastObservedClipboardRevision = board.changeCount
+                return
+            }
+        }
         let now = Date()
         if count == lastAttemptedClipboardRevision, now.timeIntervalSince(lastAttemptedClipboardAt) < 1.0 {
             return
@@ -508,6 +531,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             clipboardGeneration += 1
             lastObservedClipboardRevision = nil
             lastAttemptedClipboardRevision = nil
+            lastGuestClipboardFileURLs = nil
             replyHandler(true,nil)
         case "clipboardSyncRelease":
             guard let id = body["files"] as? String, UUID(uuidString: id) != nil else { replyHandler(nil,"剪贴板文件标识无效"); return }
@@ -541,7 +565,8 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             let generation = clipboardGeneration
             let expected = body["revision"] as? Int
             let write: ([URL]?, String) -> Void = { urls, cache in
-                guard generation == self.clipboardGeneration, expected == nil || board.changeCount == expected else {
+                let allowEcho = urls != nil && self.isScreenSharingFilenameEcho(board, fileNames: urls!.map(\.lastPathComponent))
+                guard generation == self.clipboardGeneration, expected == nil || board.changeCount == expected || allowEcho else {
                     self.clipboardPending.remove(cache)
                     self.releaseClipboardCache(cache) { replyHandler(["superseded":true,"revision":board.changeCount],nil) }
                     return
@@ -560,11 +585,23 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
                     board.clearContents(); written = board.setString(text,forType:.string)
                 } else { replyHandler(nil,"剪贴板内容格式或大小无效"); return }
                 guard written else { replyHandler(nil,"剪贴板写入失败"); return }
+                if let urls {
+                    self.lastGuestClipboardFileURLs = urls
+                    self.lastGuestClipboardFileAt = Date()
+                } else {
+                    self.lastGuestClipboardFileURLs = nil
+                }
                 if !cache.isEmpty { self.clipboardCacheCommand("publish", id: cache) { _, _ in } }
                 self.lastObservedClipboardRevision = board.changeCount
                 replyHandler(["revision":board.changeCount],nil)
             }
             if let id = body["files"] as? String, UUID(uuidString:id) != nil {
+                if let expected, board.changeCount != expected,
+                   NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.ScreenSharing").isEmpty ||
+                   !(board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []).isEmpty {
+                    replyHandler(["superseded":true,"revision":board.changeCount],nil)
+                    return
+                }
                 fileCommand(["clipboard-files","--json","--connection",body["connection_id"] as? String ?? "local","receive",id]) { result, error in
                     guard error == nil, let paths = (result as? [String:Any])?["paths"] as? [String] else { self.restoreClipboardCaches(); replyHandler(nil,error ?? "剪贴板文件读取失败"); return }
                     let cache = (result as? [String:Any])?["cache_id"] as? String ?? ""

@@ -17,7 +17,7 @@ export const clipboardReconnectDelay = failures => Math.min(1500 * 2 ** Math.max
 // One connection owns clipboard synchronization for the workbench window,
 // including while its remote canvas is hidden or the window is unfocused.
 export function shareClipboard({ connect, native, onStatus, setActive, interval = 300, schedule = setTimeout }) {
-  let socket, timer, retry, disposed = false, revision, generation = 0, guestReady = false, guestSession, failures = 0;
+  let socket, timer, retry, disposed = false, revision, generation = 0, guestReady = false, guestSession, guestOS = "", failures = 0;
   let polling, repoll = false, repollInitial = false, writes = Promise.resolve(), lastPayload = "", serial = 0, errorShown = false, acknowledgedRevision, guestRevision, supersededUntil = 0, pendingGuestWrites = 0;
   let sessionGeneration = 0;
   let sessionController = new AbortController();
@@ -162,6 +162,7 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
         revision = undefined; acknowledgedRevision = undefined; lastPayload = ""; guestRevision = undefined;
       }
       guestSession = hello.session;
+      guestOS = typeof hello.os === "string" ? hello.os : "";
       guestReady = supported && hello.available === true;
       if (typeof hello.revision === "number") guestRevision = hello.revision;
       if (!guestReady) setActive(false);
@@ -197,8 +198,10 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
       if (disposed || !guestReady || socket !== currentSocket || sequence !== generation) return;
       const current = await native("clipboardRevision");
       if (disposed || !guestReady || socket !== currentSocket || sequence !== generation) return;
-      if (revision === undefined || current !== revision) {
+      if (revision === undefined || (current !== revision && !(guestOS === "darwin" && content.files))) {
         // A newer local copy wins over an update that was already in transit.
+        // On macOS, Finder copies with Screen Sharing open can bump revision
+        // with a degraded filename echo first, so native clipboardSyncWrite arbitrates.
         void poll().catch(warn);
         return;
       }
