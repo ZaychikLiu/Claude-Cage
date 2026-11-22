@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -207,7 +208,8 @@ func runningStageError(err error) string {
 }
 
 func checkRunning(ctx context.Context, profile string, s Store) error {
-	if _, err := s.Route(); err != nil {
+	resolved, err := s.ResolveHops()
+	if err != nil {
 		return err
 	}
 	var cfg struct {
@@ -239,6 +241,20 @@ func checkRunning(ctx context.Context, profile string, s Store) error {
 	}
 	if group.Now != s.Selected {
 		return &coreError{stage: "readiness.selection"}
+	}
+	for _, hop := range resolved {
+		if hop.Relay == nil {
+			continue
+		}
+		var relayGroup struct {
+			Now string `json:"now"`
+		}
+		if err := API(ctx, profile, "GET", "/proxies/"+hop.GroupName, nil, &relayGroup); err != nil {
+			return &coreError{stage: "readiness.relay-group", err: err}
+		}
+		if relayGroup.Now != "" && !slices.Contains(hop.Members, relayGroup.Now) {
+			return &coreError{stage: "readiness.relay-selection"}
+		}
 	}
 	return nil
 }

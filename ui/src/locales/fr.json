@@ -2711,5 +2711,16 @@
   "删除后会从账号管理、调度和 Desktop 列表中移除此账号。请先关闭该账号的终端与 Desktop；虚拟机内的会话历史和资料会保留。": "Après suppression, ce compte sera retiré de la gestion, de la planification et de la liste Desktop. Veuillez d'abord fermer les terminaux et le Desktop de ce compte ; l'historique des sessions et les données dans la machine virtuelle seront conservés.",
   "删除后会从账号管理与调度中移除此账号。虚拟机内的会话历史和资料会保留。": "Après suppression, ce compte sera retiré de la gestion et de la planification. L'historique des sessions et les données dans la machine virtuelle seront conservés.",
   "丢弃文件": "Supprimer le fichier",
-  "正在丢弃…": "Suppression…"
+  "正在丢弃…": "Suppression…",
+  "故障转移 · {0}": "Basculement · {0}",
+  "最低延迟 · {0}": "Latence minimale · {0}",
+  "{0}（当前：{1}）": "{0} (actuel : {1})",
+  "自定义中转组（{0} 个节点）": "Groupe relais personnalisé ({0} nœuds)",
+  "中转订阅来源已被移除，请重新选择": "La source d'abonnement relais a été supprimée, veuillez en choisir une autre",
+  "自动切换中转": "Relais à basculement automatique",
+  "故障转移 · {0}（{1} 个可用）": "Basculement · {0} ({1} disponibles)",
+  "最低延迟 · {0}（{1} 个可用）": "Latence minimale · {0} ({1} disponibles)",
+  "自动切换当前中转：{0}（最终出口 IP 不变）": "Relais automatique actuel : {0} (l'IP de sortie finale reste inchangée)",
+  "中转不可用时按顺序自动故障转移，最终出口 IP 不变": "Bascule automatiquement dans l'ordre si le relais est indisponible ; l'IP de sortie finale reste inchangée",
+  "自动选择延迟最低的中转节点，最终出口 IP 不变": "Sélectionne automatiquement le nœud relais avec la plus faible latence ; l'IP de sortie finale reste inchangée"
 }

@@ -2711,5 +2711,16 @@
   "删除后会从账号管理、调度和 Desktop 列表中移除此账号。请先关闭该账号的终端与 Desktop；虚拟机内的会话历史和资料会保留。": "Ka dib markii la tirtiro koontadan waxaa laga saari doonaa maamulka koontada, jadwalka iyo liiska Desktop. Fadlan marka hore xidh terminaalada iyo Desktop-ka koontadan; taariikhda kulamada iyo xogta ku jirta mashiinka farsamada waa la hayn doonaa.",
   "删除后会从账号管理与调度中移除此账号。虚拟机内的会话历史和资料会保留。": "Ka dib markii la tirtiro koontadan waxaa laga saari doonaa maamulka koontada iyo jadwalka. Taariikhda kulamada iyo xogta ku jirta mashiinka farsamada waa la hayn doonaa.",
   "丢弃文件": "Tuur faylka",
-  "正在丢弃…": "Waa la tuurayaa…"
+  "正在丢弃…": "Waa la tuurayaa…",
+  "故障转移 · {0}": "Beddelaad toos ah · {0}",
+  "最低延迟 · {0}": "Daahitaan ugu yar · {0}",
+  "{0}（当前：{1}）": "{0} (hadda: {1})",
+  "自定义中转组（{0} 个节点）": "Koox gudbiye gaar ah ({0} node)",
+  "中转订阅来源已被移除，请重新选择": "Isha rukunka gudbiyaha waa la saaray, fadlan mar kale dooro",
+  "自动切换中转": "Gudbiye si toos ah isu beddela",
+  "故障转移 · {0}（{1} 个可用）": "Beddelaad toos ah · {0} ({1} diyaar ah)",
+  "最低延迟 · {0}（{1} 个可用）": "Daahitaan ugu yar · {0} ({1} diyaar ah)",
+  "自动切换当前中转：{0}（最终出口 IP 不变）": "Gudbiyaha tooska ah ee hadda: {0} (IP-ga bixitaanka kama dambaysta ah isma beddelo)",
+  "中转不可用时按顺序自动故障转移，最终出口 IP 不变": "Si toos ah ayuu siday u kala horreeyaan ugu wareegaa haddii gudbiyuhu fashilmo; IP-ga bixitaanka kama dambaysta ah isma beddelo",
+  "自动选择延迟最低的中转节点，最终出口 IP 不变": "Si toos ah ayuu u doortaa node-ka gudbiyaha ee ugu daahitaanka yar; IP-ga bixitaanka kama dambaysta ah isma beddelo"
 }

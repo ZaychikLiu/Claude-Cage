@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,9 +35,10 @@ type proxyInput struct {
 	Content      string   `json:"content"`
 	Interval     int      `json:"interval_hours"`
 	HostDownload bool     `json:"host_download"`
-	NodeID       string   `json:"node_id"`
-	NodeIDs      []string `json:"node_ids"`
-	Port         int      `json:"port"`
+	NodeID       string                  `json:"node_id"`
+	NodeIDs      []string                `json:"node_ids"`
+	Hops         []managedproxy.RouteHop `json:"hops,omitempty"`
+	Port         int                     `json:"port"`
 	Server       string   `json:"server"`
 	ServerPort   int      `json:"server_port"`
 }
@@ -110,9 +112,10 @@ func (s *Server) proxyStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	_, coreErr := managedproxy.CorePath()
 	route, routeErr := p.Route()
-	if route == nil {
+	if route == nil && len(p.RouteHops) == 0 {
 		route = append([]string{}, p.Chain...)
 	}
+	routeHops := buildRouteHopsView(ctx, s.profile, p, running)
 	routeError := ""
 	if routeErr != nil && selected {
 		routeError = routeErr.Error()
@@ -120,7 +123,47 @@ func (s *Server) proxyStatus(w http.ResponseWriter, r *http.Request) {
 			state, label = "migration_required", "需要迁移代理节点"
 		}
 	}
-	jsonReply(w, map[string]any{"route": route, "route_error": routeError, "sources": sources, "selected": p.Selected, "port": p.Port, "running": running, "active": active, "state": state, "state_label": label, "network_open": state == "ready", "core_available": coreErr == nil, "version": version.Version, "revision": p.Revision, "bootstrap_dns": strings.Join(p.NodeResolvers(), "、"), "udp_blocked": true, "ipv6_blocked": true})
+	jsonReply(w, map[string]any{"route": route, "route_hops": routeHops, "route_error": routeError, "sources": sources, "selected": p.Selected, "port": p.Port, "running": running, "active": active, "state": state, "state_label": label, "network_open": state == "ready", "core_available": coreErr == nil, "version": version.Version, "revision": p.Revision, "bootstrap_dns": strings.Join(p.NodeResolvers(), "、"), "udp_blocked": true, "ipv6_blocked": true})
+}
+
+func buildRouteHopsView(ctx context.Context, profile string, p managedproxy.Store, running bool) []map[string]any {
+	resolved, err := p.ResolveHops()
+	if err == nil && len(resolved) > 0 {
+		out := make([]map[string]any, 0, len(resolved))
+		for _, hop := range resolved {
+			if hop.Relay == nil {
+				out = append(out, map[string]any{"node_id": hop.NodeID})
+				continue
+			}
+			entry := map[string]any{
+				"relay":           hop.Relay,
+				"group":           hop.GroupName,
+				"candidate_count": len(hop.Members),
+			}
+			if running {
+				var group struct {
+					Now string `json:"now"`
+				}
+				if managedproxy.API(ctx, profile, "GET", "/proxies/"+hop.GroupName, nil, &group) == nil && group.Now != "" && slices.Contains(hop.Members, group.Now) {
+					entry["active_node_id"] = group.Now
+				}
+			}
+			out = append(out, entry)
+		}
+		return out
+	}
+	if len(p.RouteHops) > 0 {
+		out := make([]map[string]any, 0, len(p.RouteHops))
+		for _, hop := range p.RouteHops {
+			if hop.Relay != nil {
+				out = append(out, map[string]any{"relay": hop.Relay})
+			} else if hop.NodeID != "" {
+				out = append(out, map[string]any{"node_id": hop.NodeID})
+			}
+		}
+		return out
+	}
+	return nil
 }
 func (s *Server) proxyMutation(w http.ResponseWriter, r *http.Request) {
 	if r.PathValue("action") == "import-local" && !s.requireLocalConfigAccess(w, r) {
@@ -189,19 +232,29 @@ func (s *Server) changeProxy(action string, in proxyInput, resumeVersion *uint64
 	}
 	if action == "select" || action == "restart" || action == "route" {
 		if action == "route" {
-			if len(in.NodeIDs) == 0 {
-				return errors.New("请至少选择一个最终出口")
+			if len(in.Hops) > 0 && len(in.NodeIDs) > 0 {
+				return errors.New("node_ids 与 hops 只能填写一个")
 			}
-			p.Chain = append([]string(nil), in.NodeIDs...)
-			p.Selected = p.Chain[len(p.Chain)-1]
-			// A one-node route is the interface's single-exit mode. It keeps
-			// the exit's imported dialer-proxy hops, as select does, instead of
-			// overriding them with a direct connection (#345).
-			if len(p.Chain) == 1 {
-				p.Chain = nil
-			}
-			if _, err := p.Route(); err != nil {
-				return err
+			if len(in.Hops) > 0 {
+				if err := p.SetRouteHops(in.Hops); err != nil {
+					return err
+				}
+			} else {
+				if len(in.NodeIDs) == 0 {
+					return errors.New("请至少选择一个最终出口")
+				}
+				p.RouteHops = nil
+				p.Chain = append([]string(nil), in.NodeIDs...)
+				p.Selected = p.Chain[len(p.Chain)-1]
+				// A one-node route is the interface's single-exit mode. It keeps
+				// the exit's imported dialer-proxy hops, as select does, instead of
+				// overriding them with a direct connection (#345).
+				if len(p.Chain) == 1 {
+					p.Chain = nil
+				}
+				if _, err := p.Route(); err != nil {
+					return err
+				}
 			}
 		}
 		if action == "select" {
@@ -212,6 +265,7 @@ func (s *Server) changeProxy(action string, in proxyInput, resumeVersion *uint64
 			// 追加到已含该节点的链里造成重复；需要多跳请使用 route。
 			p.Selected = in.NodeID
 			p.Chain = nil
+			p.RouteHops = nil
 		}
 		if in.Port != 0 {
 			if in.Port < 1024 || in.Port > 65535 {
@@ -243,10 +297,14 @@ func (s *Server) changeProxy(action string, in proxyInput, resumeVersion *uint64
 				}
 			}
 		}
+		if p.RouteHopsReferencesSource(p.Sources[index]) {
+			return errors.New("该来源包含当前代理链中的节点，请先选择并应用其他来源的节点")
+		}
 		p.Sources = append(p.Sources[:index], p.Sources[index+1:]...)
 		if _, ok := p.Find(p.Selected); !ok {
 			p.Selected = ""
 			p.Chain = nil
+			p.RouteHops = nil
 		}
 	} else if action == "edit-node" {
 		// Address and port of a locally imported node can change in place; the
@@ -357,6 +415,7 @@ func (s *Server) changeProxy(action string, in proxyInput, resumeVersion *uint64
 			}
 			candidate.Selected = added.Nodes[0].ID
 			candidate.Chain = nil
+			candidate.RouteHops = nil
 		}
 		if err = validateProxyCore(ctx, s.profile, candidate); err != nil {
 			s.proxySourceFailure(in.ID, err)

@@ -24,6 +24,17 @@ import { ProxyYAMLInput } from "./proxy-yaml-input";
 import { LocalConfigImport } from "./local-config-import";
 import { getClientContext } from "./client-context.mjs";
 import { useWindowVisibility } from "./window-visibility";
+import {
+  activeRelayNodeIDs,
+  fixedNodeSet,
+  hopsFromProxy,
+  isRouteValid,
+  parseCustomRelayIndex,
+  parseRelayToken,
+  relayCandidatesForSource,
+  relayToken,
+  routePayload,
+} from "./proxy-route.mjs";
 import "./proxy.css";
 import { translate, useTranslation } from "./interface-language.mjs";
 
@@ -235,7 +246,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
       if (alive.current) setPending("");
     }
   };
-  const applyRoute = async (nodeIDs) => {
+  const applyRoute = async (routeTokens) => {
     if (
       (!proxy.active && !needsMigration || Number(port) !== proxy.port) &&
       status.vm_running &&
@@ -246,7 +257,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
       }))
     )
       return;
-    mutate("route", { node_ids: nodeIDs, port: Number(port) });
+    mutate("route", routePayload(routeTokens, port, proxy.route_hops));
   };
   const measure = async (ids) => {
     if (measuring.current) return;
@@ -339,11 +350,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
     if (!nodeEdit.id || !nodeEdit.server.trim() || !Number.isInteger(port) || port < 1 || port > 65535) return;
     mutate("edit-node", { id: form.id, node_id: nodeEdit.id, server: nodeEdit.server.trim(), server_port: port });
   };
-  const savedRoute = proxy?.route?.length
-    ? proxy.route
-    : proxy?.selected
-      ? [proxy.selected]
-      : [""];
+  const savedRoute = hopsFromProxy(proxy);
   const route = routeDraft ?? savedRoute;
   const routeChanged = JSON.stringify(route) !== JSON.stringify(savedRoute);
   const manualSSH = manual.type === "ssh";
@@ -365,12 +372,43 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
   );
   const selected = allNodes.find((n) => n.id === proxy.selected);
   const usableNodes = allNodes.filter((node) => !node.blocked_reason);
-  const needsMigration = allNodes.some((node) => node.blocked_reason && savedRoute.includes(node.id));
+  const relayNodeIDsInHops = new Set(
+    (proxy.route_hops || []).flatMap((hop) => hop?.relay?.node_ids || []),
+  );
+  const needsMigration =
+    allNodes.some(
+      (node) =>
+        node.blocked_reason &&
+        (savedRoute.includes(node.id) ||
+          proxy.route?.includes(node.id) ||
+          relayNodeIDsInHops.has(node.id)),
+    ) ||
+    Boolean(proxy.route_error && proxy.route_error.includes("本机代理端口"));
   const active = proxy.active && !needsMigration;
-  const routeValid =
-    route.every((id) => usableNodes.some((n) => n.id === id)) &&
-    new Set(route).size === route.length;
-  const routeName = (id) => allNodes.find((n) => n.id === id)?.name || "待选择";
+  const routeValid = isRouteValid(route, proxy.sources, usableNodes, proxy.route_hops);
+  const activeRelays = activeRelayNodeIDs(proxy);
+  const fixedRouteIDs = fixedNodeSet(route);
+  const routeName = (id, index = -1) => {
+    const relay = parseRelayToken(id);
+    if (relay) {
+      const src = proxy.sources.find((s) => s.id === relay.sourceID);
+      const sourceName = src?.name || relay.sourceID;
+      const base =
+        relay.strategy === "fallback"
+          ? tr("故障转移 · {0}", sourceName)
+          : tr("最低延迟 · {0}", sourceName);
+      const activeID = !routeChanged && index >= 0 ? proxy.route_hops?.[index]?.active_node_id : "";
+      const activeNodeName = activeID && allNodes.find((n) => n.id === activeID)?.name;
+      return activeNodeName ? tr("{0}（当前：{1}）", base, activeNodeName) : base;
+    }
+    const customIdx = parseCustomRelayIndex(id);
+    if (customIdx !== null) {
+      const customHop = proxy.route_hops?.[customIdx];
+      const count = customHop?.relay?.node_ids?.length || 0;
+      return tr("自定义中转组（{0} 个节点）", count);
+    }
+    return allNodes.find((n) => n.id === id)?.name || "待选择";
+  };
   const updateHop = (index, id) =>
     setRouteDraft(route.map((current, i) => (i === index ? id : current)));
   const nodes = allNodes.filter(
@@ -560,6 +598,27 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
                   const label = final
                     ? tr("最终出口")
                     : route.length > 2 ? tr("中转节点 {0}", index + 1) : tr("中转节点");
+                  const parsedRelay = !final ? parseRelayToken(id) : null;
+                  const customIdx = !final ? parseCustomRelayIndex(id) : null;
+                  const usedOtherRelaySources = new Set(
+                    route
+                      .map((tok, i) => (i !== index ? parseRelayToken(tok)?.sourceID : null))
+                      .filter(Boolean),
+                  );
+                  const hopStatus = !routeChanged ? proxy.route_hops?.[index] : null;
+                  const activeRelayName =
+                    hopStatus?.active_node_id &&
+                    allNodes.find((n) => n.id === hopStatus.active_node_id)?.name;
+                  const autoRelaySources = !final
+                    ? proxy.sources.filter((src) => {
+                        const candidates = relayCandidatesForSource(src, usableNodes, fixedRouteIDs);
+                        return (
+                          candidates.length >= 2 ||
+                          relayToken("fallback", src.id) === id ||
+                          relayToken("url-test", src.id) === id
+                        );
+                      })
+                    : [];
                   return (
                     <li
                       key={index}
@@ -582,11 +641,56 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
                             {tr("请选择{0}", label)}
                           </option>
                           {Boolean(id) &&
+                            !parsedRelay &&
+                            customIdx === null &&
                             !allNodes.some((n) => n.id === id) && (
                               <option value={id} disabled>
                                 {tr("节点已被移除，请重新选择")}
                               </option>
                             )}
+                          {parsedRelay &&
+                            !proxy.sources.some((s) => s.id === parsedRelay.sourceID) && (
+                              <option value={id} disabled>
+                                {tr("中转订阅来源已被移除，请重新选择")}
+                              </option>
+                            )}
+                          {customIdx !== null && (
+                            <option value={id}>
+                              {tr(
+                                "自定义中转组（{0} 个节点）",
+                                proxy.route_hops?.[customIdx]?.relay?.node_ids?.length || 0,
+                              )}
+                            </option>
+                          )}
+                          {autoRelaySources.length > 0 && (
+                            <optgroup label={tr("自动切换中转")}>
+                              {autoRelaySources.flatMap((src) => {
+                                const count = relayCandidatesForSource(
+                                  src,
+                                  usableNodes,
+                                  fixedRouteIDs,
+                                ).length;
+                                const disabled =
+                                  usedOtherRelaySources.has(src.id) || count === 0;
+                                return [
+                                  <option
+                                    key={relayToken("fallback", src.id)}
+                                    value={relayToken("fallback", src.id)}
+                                    disabled={disabled}
+                                  >
+                                    {tr("故障转移 · {0}（{1} 个可用）", src.name, count)}
+                                  </option>,
+                                  <option
+                                    key={relayToken("url-test", src.id)}
+                                    value={relayToken("url-test", src.id)}
+                                    disabled={disabled}
+                                  >
+                                    {tr("最低延迟 · {0}（{1} 个可用）", src.name, count)}
+                                  </option>,
+                                ];
+                              })}
+                            </optgroup>
+                          )}
                           {proxy.sources.map((src) => (
                             <optgroup key={src.id} label={src.name}>
                               {src.nodes.map((n) => (
@@ -603,6 +707,15 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
                             </optgroup>
                           ))}
                         </InlineSelect>
+                        {!final && parsedRelay && (
+                          <small>
+                            {activeRelayName
+                              ? tr("自动切换当前中转：{0}（最终出口 IP 不变）", activeRelayName)
+                              : parsedRelay.strategy === "fallback"
+                                ? tr("中转不可用时按顺序自动故障转移，最终出口 IP 不变")
+                                : tr("自动选择延迟最低的中转节点，最终出口 IP 不变")}
+                          </small>
+                        )}
                         {final && usableNodes.some((node) => node.id === id) && <small>{tr("目标网站看到此节点的出口 IP")}</small>}
                       </div>
                       {!final && (
@@ -642,7 +755,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
                 {route.map((id, index) => (
                   <React.Fragment key={index}>
                     <ArrowRight size={13} aria-hidden="true" />
-                    <strong>{routeName(id)}</strong>
+                    <strong>{routeName(id, index)}</strong>
                   </React.Fragment>
                 ))}
                 <ArrowRight size={13} aria-hidden="true" />
@@ -795,7 +908,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
                       </small>
                     </span>
                   </button>
-                  {active && savedRoute.includes(n.id) && (
+                  {active && (savedRoute.includes(n.id) || activeRelays.has(n.id)) && (
                     <span className="proxy-node-role">
                       {n.id === proxy.selected ? tr("当前出口") : tr("当前中转")}
                     </span>

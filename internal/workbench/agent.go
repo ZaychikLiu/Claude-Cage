@@ -65,7 +65,7 @@ func AgentOperations() []AgentOperation {
 	get("proxy.status", "List source and node IDs without subscription URLs or node secrets", "/api/proxy")
 	proxy := from(proxyInput{})
 	for _, action := range []string{"import", "refresh", "edit", "edit-node", "delete", "select", "route", "restart", "stop"} {
-		post("proxy."+action, "Proxy operation; import creates a source, refresh updates an existing source (a local source needs new content and keeps node IDs by name), edit-node changes server/server_port of a local node only. Read state before retrying. select/route applies the route", "/api/proxy/"+action, proxy)
+		post("proxy."+action, "Proxy operation; import creates a source, refresh updates an existing source (a local source needs new content and keeps node IDs by name), edit-node changes server/server_port of a local node only. Read state before retrying. select applies node_id; route accepts node_ids or hops ([{node_id} or {relay:{strategy:\"fallback\"|\"url-test\",source_id|node_ids}}], final hop must be a pinned node_id)", "/api/proxy/"+action, proxy)
 	}
 	get("guest.options", "Whether the environment is new, and any installation an earlier version left unfinished", "/api/environment/guest-systems")
 	get("initialization.status", "Read initial setup state; desktop_active indicates desktop first-run onboarding is active", "/api/environment/initialization")
