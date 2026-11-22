@@ -51,7 +51,9 @@ func validateSourceDNS(servers []string) ([]string, error) {
 	for i, raw := range servers {
 		raw = strings.TrimSpace(raw)
 		u, err := url.Parse(raw)
-		if err != nil || len(raw) > 2048 || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || local.contains(u.Hostname()) {
+		isDoH := err == nil && u.Scheme == "https"
+		isDoT := err == nil && u.Scheme == "tls" && (u.Path == "" || u.Path == "/") && u.RawQuery == ""
+		if err != nil || len(raw) > 2048 || (!isDoH && !isDoT) || u.Hostname() == "" || u.User != nil || u.Fragment != "" || local.contains(u.Hostname()) {
 			return nil, fmt.Errorf("订阅的第 %d 个节点 DNS 需要远程 HTTPS DoH 地址，不支持用户名、密码或 # 路由参数", i+1)
 		}
 		if port := u.Port(); port != "" {
@@ -59,6 +61,12 @@ func validateSourceDNS(servers []string) ([]string, error) {
 			if err != nil || n < 1 || n > 65535 {
 				return nil, fmt.Errorf("订阅的第 %d 个节点 DNS 端口无效", i+1)
 			}
+		}
+		// Remote DoT (tls://host[:port]) resolvers in third-party Clash
+		// subscriptions are validated above and deferred to Cage's own HTTPS DoH
+		// resolvers rather than rejecting the subscription or dialing port 853.
+		if isDoT {
+			continue
 		}
 		if !slices.Contains(out, raw) {
 			out = append(out, raw)

@@ -143,7 +143,7 @@ func TestSubscriptionNodeDNSRejectsCrossSourceConflicts(t *testing.T) {
 }
 
 func TestSubscriptionNodeDNSValidatesUntrustedEndpoints(t *testing.T) {
-	for _, server := range []string{"http://resolver.example/dns-query", "system", "tls://resolver.example", "https://localhost/dns-query", "https://127.0.0.1/dns-query", "https://user:private-password@resolver.example/dns-query", "https://resolver.example/dns-query#private-route", "https://resolver.example:65536/dns-query", "https://resolver.example:0/dns-query"} {
+	for _, server := range []string{"http://resolver.example/dns-query", "system", "tls://localhost:853", "tls://127.0.0.1:853", "tls://user:private-password@resolver.example:853", "tls://resolver.example:853#private-route", "tls://resolver.example:65536", "tls://resolver.example/path", "https://localhost/dns-query", "https://127.0.0.1/dns-query", "https://user:private-password@resolver.example/dns-query", "https://resolver.example/dns-query#private-route", "https://resolver.example:65536/dns-query", "https://resolver.example:0/dns-query"} {
 		t.Run(server, func(t *testing.T) {
 			s, _ := Load(t.TempDir())
 			err := s.Import("source", "", []byte(sourceDNSInput("node.example.test", server)), "source", 0, "")
@@ -175,4 +175,57 @@ func TestSubscriptionNodeDNSValidatesUntrustedEndpoints(t *testing.T) {
 	if _, err := s.Runtime(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestSubscriptionNodeDNSDefersValidRemoteDoTToDefaultDoH(t *testing.T) {
+	t.Run("dot-only", func(t *testing.T) {
+		s, _ := Load(t.TempDir())
+		s.BootstrapDNS = []string{"https://223.5.5.5/dns-query"}
+		if err := s.Import("resip", "", []byte(sourceDNSInput("node.example.test", "tls://223.5.5.5:853", "tls://120.53.53.53:853")), "resip", 0, ""); err != nil {
+			t.Fatal(err)
+		}
+		if len(s.Sources[0].NodeDNS) != 0 {
+			t.Fatalf("expected DoT entries to defer cleanly, got %v", s.Sources[0].NodeDNS)
+		}
+		s.Selected = s.Sources[0].Nodes[0].ID
+		wire, err := s.Runtime(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]any
+		if err = yaml.Unmarshal(wire, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		dns := cfg["dns"].(map[string]any)
+		if !reflect.DeepEqual(dns["proxy-server-nameserver"], []any{"https://223.5.5.5/dns-query"}) {
+			t.Fatalf("expected Cage BootstrapDNS, got %v", dns["proxy-server-nameserver"])
+		}
+		if policy, _ := dns["proxy-server-nameserver-policy"].(map[string]any); len(policy) != 0 {
+			t.Fatalf("expected no DoT override policy, got %v", policy)
+		}
+	})
+
+	t.Run("mixed-dot-and-doh", func(t *testing.T) {
+		s, _ := Load(t.TempDir())
+		if err := s.Import("mixed", "", []byte(sourceDNSInput("node.example.test", "tls://223.5.5.5:853", "https://resolver.example.test/dns-query")), "mixed", 0, ""); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"https://resolver.example.test/dns-query"}
+		if !reflect.DeepEqual(s.Sources[0].NodeDNS, want) {
+			t.Fatalf("expected %v, got %v", want, s.Sources[0].NodeDNS)
+		}
+	})
+
+	t.Run("shared-domain-two-sources", func(t *testing.T) {
+		s, _ := Load(t.TempDir())
+		for _, id := range []string{"resip-vless", "resip-anytls"} {
+			if err := s.Import(id, "", []byte(sourceDNSInput("shared.example.test", "tls://223.5.5.5:853")), id, 0, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.Selected = s.Sources[0].Nodes[0].ID
+		if _, err := s.Runtime(t.TempDir()); err != nil {
+			t.Fatalf("shared node domain across two DoT sources failed: %v", err)
+		}
+	})
 }
