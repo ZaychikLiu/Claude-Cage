@@ -472,7 +472,11 @@ func (s Store) Runtime(profile string) ([]byte, error) {
 	for _, g := range relayGroups {
 		proxyGroups = append(proxyGroups, g)
 	}
-	proxyGroups = append(proxyGroups, map[string]any{"name": Group, "type": "select", "proxies": []string{s.Selected}})
+	exitTarget := s.Selected
+	if len(resolved) > 0 {
+		exitTarget = resolved[len(resolved)-1].runtimeTarget()
+	}
+	proxyGroups = append(proxyGroups, map[string]any{"name": Group, "type": "select", "proxies": []string{exitTarget}})
 	config := map[string]any{"mixed-port": s.Port, "bind-address": "127.0.0.1", "allow-lan": false, "skip-auth-prefixes": []string{}, "mode": "rule", "ipv6": routeHasIPv6Server(resolved, originals), "log-level": "warning", "find-process-mode": "off", "external-controller-unix": Socket(profile), "tun": map[string]any{"enable": false}, "dns": dns, "geo-auto-update": false, "profile": map[string]any{"store-selected": false}, "proxy-groups": proxyGroups}
 	// An explicit environment chain can override imported dialers. Named
 	// account routes retain the node's imported chain, including dependent hops.

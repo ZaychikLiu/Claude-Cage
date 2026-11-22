@@ -239,7 +239,11 @@ func checkRunning(ctx context.Context, profile string, s Store) error {
 	if err := API(ctx, profile, "GET", "/proxies/"+Group, nil, &group); err != nil {
 		return &coreError{stage: "readiness.group", err: err}
 	}
-	if group.Now != s.Selected {
+	wantTarget := s.Selected
+	if len(resolved) > 0 {
+		wantTarget = resolved[len(resolved)-1].runtimeTarget()
+	}
+	if group.Now != wantTarget {
 		return &coreError{stage: "readiness.selection"}
 	}
 	for _, hop := range resolved {

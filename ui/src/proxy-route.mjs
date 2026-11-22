@@ -59,15 +59,32 @@ export function relayCandidatesForSource(source, usableNodes, fixedIDs) {
 export function isRouteValid(tokens, sources = [], usableNodes = [], savedHops = []) {
   if (!Array.isArray(tokens) || tokens.length === 0) return false;
   const last = tokens[tokens.length - 1];
-  if (!last || parseRelayToken(last) || parseCustomRelayIndex(last) !== null) return false;
+  const lastCustomIdx = parseCustomRelayIndex(last);
+  if (!last || parseRelayToken(last)) return false;
 
   const usableIDs = new Set((usableNodes || []).map((n) => n.id));
-  if (!usableIDs.has(last)) return false;
+  if (lastCustomIdx === null && !usableIDs.has(last)) return false;
 
+  const explicitUsed = new Set();
   const fixed = new Set();
-  const usedSources = new Set();
-  const allFixed = fixedNodeSet(tokens);
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!tok || parseRelayToken(tok)) continue;
+    const customIdx = parseCustomRelayIndex(tok);
+    if (customIdx !== null) {
+      const custom = savedHops?.[customIdx]?.relay;
+      if (!custom?.node_ids || custom.node_ids.length < 2) return false;
+      for (const id of custom.node_ids) {
+        if (!usableIDs.has(id) || explicitUsed.has(id)) return false;
+        explicitUsed.add(id);
+      }
+      continue;
+    }
+    if (!usableIDs.has(tok) || explicitUsed.has(tok)) return false;
+    explicitUsed.add(tok);
+  }
 
+  const usedSources = new Set();
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (!tok) return false;
@@ -76,16 +93,14 @@ export function isRouteValid(tokens, sources = [], usableNodes = [], savedHops =
       if (i === tokens.length - 1 || usedSources.has(relay.sourceID)) return false;
       const src = (sources || []).find((s) => s.id === relay.sourceID);
       if (!src) return false;
-      if (relayCandidatesForSource(src, usableNodes, allFixed).length < 1) return false;
+      if (relayCandidatesForSource(src, usableNodes, explicitUsed).length < 1) return false;
       usedSources.add(relay.sourceID);
       continue;
     }
     const customIdx = parseCustomRelayIndex(tok);
     if (customIdx !== null) {
-      if (i === tokens.length - 1) return false;
       const custom = savedHops?.[customIdx]?.relay;
       if (!custom?.node_ids || custom.node_ids.length < 2) return false;
-      if (custom.node_ids.some((id) => !usableIDs.has(id) || allFixed.has(id))) return false;
       continue;
     }
     if (!usableIDs.has(tok) || fixed.has(tok)) return false;

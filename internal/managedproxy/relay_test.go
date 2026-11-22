@@ -215,7 +215,8 @@ func TestRelayGroupRejectsInvalidShapesAndExcludesExitFromSource(t *testing.T) {
 		hops []RouteHop
 	}{
 		{"empty", nil},
-		{"relay-as-exit", []RouteHop{{NodeID: r1}, {Relay: &RelayGroup{Strategy: RelayStrategyFallback, SourceID: "mixed"}}}},
+		{"relay-source-as-exit", []RouteHop{{NodeID: r1}, {Relay: &RelayGroup{Strategy: RelayStrategyFallback, SourceID: "mixed"}}}},
+		{"exit-single-explicit-node", []RouteHop{{Relay: &RelayGroup{Strategy: RelayStrategyFallback, SourceID: "mixed"}}, {Relay: &RelayGroup{Strategy: RelayStrategyFallback, NodeIDs: []string{ex}}}}},
 		{"bad-strategy", []RouteHop{{Relay: &RelayGroup{Strategy: "select", SourceID: "mixed"}}, {NodeID: ex}}},
 		{"both-source-and-nodes", []RouteHop{{Relay: &RelayGroup{Strategy: RelayStrategyFallback, SourceID: "mixed", NodeIDs: []string{r1, r2}}}, {NodeID: ex}}},
 		{"neither-source-nor-nodes", []RouteHop{{Relay: &RelayGroup{Strategy: RelayStrategyFallback}}, {NodeID: ex}}},
@@ -228,6 +229,17 @@ func TestRelayGroupRejectsInvalidShapesAndExcludesExitFromSource(t *testing.T) {
 		if err := clone.SetRouteHops(tc.hops); err == nil {
 			t.Fatalf("case %q unexpectedly succeeded", tc.name)
 		}
+	}
+
+	// Final hop with >=2 explicit NodeIDs is accepted and emits CAGE-EXIT.
+	validExitFailover := s
+	if err := validExitFailover.SetRouteHops([]RouteHop{
+		{Relay: &RelayGroup{Strategy: RelayStrategyFallback, NodeIDs: []string{r2, ex}}},
+	}); err != nil {
+		t.Fatalf("explicit multi-exit failover rejected: %v", err)
+	}
+	if validExitFailover.Selected != r2 {
+		t.Fatalf("expected Selected=%q, got %q", r2, validExitFailover.Selected)
 	}
 }
 
@@ -637,7 +649,7 @@ func validateWithCoreBinary(t *testing.T, core, profile string, yamlBytes []byte
 	return nil
 }
 
-func waitRelayNow(t *testing.T, ctx context.Context, profile, want string) {
+func waitGroupNow(t *testing.T, ctx context.Context, profile, groupName, want string) {
 	t.Helper()
 	for {
 		var group struct {
@@ -645,17 +657,22 @@ func waitRelayNow(t *testing.T, ctx context.Context, profile, want string) {
 			History []any    `json:"history"`
 			All     []string `json:"all"`
 		}
-		if err := API(ctx, profile, "GET", "/proxies/CAGE-RELAY-0", nil, &group); err == nil {
+		if err := API(ctx, profile, "GET", "/proxies/"+groupName, nil, &group); err == nil {
 			if group.Now == want {
 				return
 			}
 			_ = slices.Contains(group.All, want)
 		}
 		if ctx.Err() != nil {
-			t.Fatalf("timed out waiting for CAGE-RELAY-0 to select %q (last now=%q)", want, group.Now)
+			t.Fatalf("timed out waiting for %s to select %q (last now=%q)", groupName, want, group.Now)
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
+}
+
+func waitRelayNow(t *testing.T, ctx context.Context, profile, want string) {
+	t.Helper()
+	waitGroupNow(t, ctx, profile, RelayGroupName(0), want)
 }
 
 func mustHTTPGet(t *testing.T, client *http.Client, targetURL string) string {
@@ -670,4 +687,268 @@ func mustHTTPGet(t *testing.T, client *http.Client, targetURL string) string {
 		t.Fatalf("GET %s status=%d err=%v body=%q", targetURL, resp.StatusCode, err, string(b))
 	}
 	return string(b)
+}
+
+func TestExitFailoverGroupResolveRuntimeAndRefresh(t *testing.T) {
+	profile := t.TempDir()
+	s, _ := Load(profile)
+	if err := s.Import("relays", "", []byte(`proxies:
+  - {name: r1, type: socks5, server: 192.0.2.1, port: 1080}
+  - {name: r2, type: socks5, server: 192.0.2.2, port: 1080}
+`), "relays", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Import("exits", "", []byte(`proxies:
+  - {name: e1, type: socks5, server: 192.0.2.11, port: 1080}
+  - {name: e2, type: socks5, server: 192.0.2.12, port: 1080}
+  - {name: e3, type: socks5, server: 192.0.2.13, port: 1080}
+`), "exits", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	e1, e2, e3 := s.Sources[1].Nodes[0].ID, s.Sources[1].Nodes[1].ID, s.Sources[1].Nodes[2].ID
+	if err := s.SetRouteHops([]RouteHop{
+		{Relay: &RelayGroup{Strategy: RelayStrategyFallback, SourceID: "relays"}},
+		{Relay: &RelayGroup{Strategy: RelayStrategyFallback, NodeIDs: []string{e1, e2, e3}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if s.Selected != e1 {
+		t.Fatalf("expected Selected=%q, got %q", e1, s.Selected)
+	}
+	data, err := s.Runtime(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rt struct {
+		ProxyGroups []map[string]any `yaml:"proxy-groups"`
+		Proxies     []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(data, &rt); err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.ProxyGroups) != 3 {
+		t.Fatalf("expected 3 proxy-groups (CAGE-RELAY-0, CAGE-EXIT, CAGE), got %d", len(rt.ProxyGroups))
+	}
+	if rt.ProxyGroups[0]["name"] != "CAGE-RELAY-0" || rt.ProxyGroups[1]["name"] != ExitGroupName || rt.ProxyGroups[1]["type"] != "fallback" {
+		t.Fatalf("unexpected relay/exit proxy-groups: %+v", rt.ProxyGroups)
+	}
+	if !reflect.DeepEqual(rt.ProxyGroups[2]["proxies"], []any{ExitGroupName}) {
+		t.Fatalf("expected CAGE to select %q, got %v", ExitGroupName, rt.ProxyGroups[2]["proxies"])
+	}
+	for _, eid := range []string{e1, e2, e3} {
+		found := false
+		for _, p := range rt.Proxies {
+			if p["name"] == eid {
+				found = true
+				if p["dialer-proxy"] != "CAGE-RELAY-0" {
+					t.Fatalf("exit %q expected dialer-proxy=CAGE-RELAY-0, got %v", eid, p["dialer-proxy"])
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("exit node %q missing in Runtime", eid)
+		}
+	}
+	bound, err := BindInterface(data, "en0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var boundRT struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(bound, &boundRT); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range boundRT.Proxies {
+		name, _ := p["name"].(string)
+		if name == e1 || name == e2 || name == e3 {
+			if _, ok := p["interface-name"]; ok {
+				t.Fatalf("exit node %q must not carry interface-name when chained via CAGE-RELAY-0", name)
+			}
+		}
+	}
+	// Refreshing exits without pinned e2 must fail closed.
+	if err := s.Import("exits", "", []byte(`proxies:
+  - {name: e1, type: socks5, server: 192.0.2.11, port: 1080}
+  - {name: e3, type: socks5, server: 192.0.2.13, port: 1080}
+`), "exits", 0, ""); err == nil {
+		t.Fatal("expected refresh dropping e2 to fail while pinned in exit failover")
+	}
+}
+
+func TestExitFailoverRealMihomoValidationAndFailover(t *testing.T) {
+	core := findTestMihomo(t)
+
+	var targetHits, relay1Hits, relay2Hits, exit1Hits, exit2Hits atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/generate_204" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		targetHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "reached-via-dual-failover")
+	}))
+	t.Cleanup(target.Close)
+
+	oldCheck := relayCheckConfig
+	relayCheckConfig = func() relayHealthCheckSettings {
+		return relayHealthCheckSettings{
+			url:      target.URL + "/generate_204",
+			interval: 1,
+			timeout:  1000,
+			lazy:     false,
+		}
+	}
+	t.Cleanup(func() { relayCheckConfig = oldCheck })
+
+	r1Port, closeRelay1 := startTestSOCKS5(t, &relay1Hits)
+	r2Port, closeRelay2 := startTestSOCKS5(t, &relay2Hits)
+	e1Port, closeExit1 := startTestSOCKS5(t, &exit1Hits)
+	e2Port, closeExit2 := startTestSOCKS5(t, &exit2Hits)
+	_ = closeRelay2
+
+	profile := t.TempDir()
+	store, err := Load(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Port = ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	if err := store.Import("relays", "", []byte(fmt.Sprintf(`proxies:
+  - {name: relay1, type: socks5, server: relay1.example.test, port: %s}
+  - {name: relay2, type: socks5, server: relay2.example.test, port: %s}
+`, r1Port, r2Port)), "relays", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Import("exits", "", []byte(fmt.Sprintf(`proxies:
+  - {name: exit1, type: socks5, server: exit1.example.test, port: %s}
+  - {name: exit2, type: socks5, server: exit2.example.test, port: %s}
+`, e1Port, e2Port)), "exits", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	r1ID := store.Sources[0].Nodes[0].ID
+	r2ID := store.Sources[0].Nodes[1].ID
+	e1ID := store.Sources[1].Nodes[0].ID
+	e2ID := store.Sources[1].Nodes[1].ID
+
+	if err := store.SetRouteHops([]RouteHop{
+		{Relay: &RelayGroup{Strategy: RelayStrategyFallback, SourceID: "relays"}},
+		{Relay: &RelayGroup{Strategy: RelayStrategyFallback, NodeIDs: []string{e1ID, e2ID}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(profile); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBytes, err := store.Runtime(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWithCoreBinary(t, core, profile, runtimeBytes); err != nil {
+		t.Fatalf("dual-failover YAML failed mihomo -t validation: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+
+	var loopback string
+	ifaces, _ := net.Interfaces()
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			loopback = iface.Name
+			break
+		}
+	}
+	runtimeBytes, err = BindInterface(runtimeBytes, loopback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(Dir(profile), "config.yaml")
+	if err := Write(configPath, runtimeBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(Socket(profile)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(Socket(profile))) })
+
+	logFile, err := os.Create(filepath.Join(profile, "mihomo.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(core, "-d", Dir(profile), "-f", configPath)
+	cmd.Env, cmd.Stdout, cmd.Stderr = coreEnvironment(Dir(profile)), logFile, logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); _ = logFile.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for !Running(ctx, profile, store) {
+		if ctx.Err() != nil {
+			t.Fatalf("mihomo core did not become ready: stage=%s", RunningStage(context.Background(), profile, store))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	liveConfig := string(runtimeBytes)
+	for _, host := range []string{"relay1.example.test", "relay2.example.test", "exit1.example.test", "exit2.example.test"} {
+		liveConfig = strings.ReplaceAll(liveConfig, host, "127.0.0.1")
+	}
+	if err := API(ctx, profile, "PUT", "/configs", map[string]string{"payload": liveConfig}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyURL, _ := url.Parse(store.Endpoint())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:             http.ProxyURL(proxyURL),
+			DisableKeepAlives: true,
+		},
+		Timeout: 4 * time.Second,
+	}
+
+	// 1. Both groups select primary: relay1 -> exit1.
+	waitGroupNow(t, ctx, profile, RelayGroupName(0), r1ID)
+	waitGroupNow(t, ctx, profile, ExitGroupName, e1ID)
+	if body := mustHTTPGet(t, client, target.URL+"/1"); body != "reached-via-dual-failover" || relay1Hits.Load() == 0 || exit1Hits.Load() == 0 || targetHits.Load() != 1 {
+		t.Fatalf("initial relay1->exit1 failed: r1=%d e1=%d target=%d", relay1Hits.Load(), exit1Hits.Load(), targetHits.Load())
+	}
+
+	// 2. Drop exit1 -> CAGE-EXIT must fail over to exit2 (relay1 -> exit2).
+	closeExit1()
+	e1Before := exit1Hits.Load()
+	waitGroupNow(t, ctx, profile, ExitGroupName, e2ID)
+	if body := mustHTTPGet(t, client, target.URL+"/2"); body != "reached-via-dual-failover" || exit1Hits.Load() != e1Before || exit2Hits.Load() == 0 || targetHits.Load() != 2 {
+		t.Fatalf("exit failover to exit2 failed: e1=%d->%d e2=%d target=%d", e1Before, exit1Hits.Load(), exit2Hits.Load(), targetHits.Load())
+	}
+
+	// 3. Drop relay1 -> CAGE-RELAY-0 must fail over to relay2 (relay2 -> exit2).
+	closeRelay1()
+	r1Before := relay1Hits.Load()
+	e2Before := exit2Hits.Load()
+	waitGroupNow(t, ctx, profile, RelayGroupName(0), r2ID)
+	if body := mustHTTPGet(t, client, target.URL+"/3"); body != "reached-via-dual-failover" || relay1Hits.Load() != r1Before || relay2Hits.Load() == 0 || exit2Hits.Load() <= e2Before || targetHits.Load() != 3 {
+		t.Fatalf("relay failover to relay2 failed: r1=%d->%d r2=%d e2=%d->%d target=%d", r1Before, relay1Hits.Load(), relay2Hits.Load(), e2Before, exit2Hits.Load(), targetHits.Load())
+	}
+
+	// 4. Drop exit2 -> must fail closed and NEVER hit target directly.
+	closeExit2()
+	time.Sleep(1500 * time.Millisecond)
+	req, _ := http.NewRequest(http.MethodGet, target.URL+"/4", nil)
+	if resp, err := client.Do(req); err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("expected fail-closed error when all exits down, got HTTP %d", resp.StatusCode)
+	}
+	if targetHits.Load() != 3 {
+		t.Fatalf("direct leak hit target when all exits closed (hits=%d)", targetHits.Load())
+	}
 }

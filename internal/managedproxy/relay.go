@@ -13,6 +13,7 @@ const (
 	RelayStrategyURLTest = "url-test"
 
 	RelayGroupPrefix      = "CAGE-RELAY-"
+	ExitGroupName         = "CAGE-EXIT"
 	MaxRelayPoolNodes     = 300
 	RelayHealthCheckURL   = "https://www.gstatic.com/generate_204"
 	RelayCheckIntervalSec = 120
@@ -122,15 +123,20 @@ func (s Store) resolveHops(blocked map[string]string) ([]ResolvedHop, error) {
 	if _, ok := s.Find(s.Selected); !ok {
 		return nil, errors.New("请先选择有效的最终出口")
 	}
-	if len(s.RouteHops) < 2 {
-		return nil, errors.New("中转代理链至少需要包含中转与最终出口")
-	}
 	last := s.RouteHops[len(s.RouteHops)-1]
-	if last.Relay != nil || last.NodeID == "" {
-		return nil, errors.New("最终出口必须是单个固定节点")
-	}
-	if last.NodeID != s.Selected {
-		return nil, errors.New("代理链与最终出口不一致，请重新配置代理")
+	if last.NodeID != "" {
+		if last.NodeID != s.Selected {
+			return nil, errors.New("代理链与最终出口不一致，请重新配置代理")
+		}
+	} else if last.Relay != nil {
+		if last.Relay.SourceID != "" || len(last.Relay.NodeIDs) < 2 {
+			return nil, errors.New("最终出口故障转移仅支持至少 2 个手动指定节点")
+		}
+		if last.Relay.NodeIDs[0] != s.Selected {
+			return nil, errors.New("代理链与最终出口不一致，请重新配置代理")
+		}
+	} else {
+		return nil, errors.New("代理链每一跳只能指定单个节点或一个中转组")
 	}
 
 	pinnedFixed := make(map[string]bool, len(s.RouteHops))
@@ -140,8 +146,8 @@ func (s Store) resolveHops(blocked map[string]string) ([]ResolvedHop, error) {
 		if hasNode == hasRelay {
 			return nil, errors.New("代理链每一跳只能指定单个节点或一个中转组")
 		}
-		if hasRelay && i == len(s.RouteHops)-1 {
-			return nil, errors.New("最终出口必须是单个固定节点")
+		if hasRelay && i == len(s.RouteHops)-1 && hop.Relay.SourceID != "" {
+			return nil, errors.New("最终出口故障转移仅支持手动指定节点列表，不能绑定整份订阅来源")
 		}
 		if hasNode {
 			if _, ok := s.Find(hop.NodeID); !ok {
@@ -151,6 +157,19 @@ func (s Store) resolveHops(blocked map[string]string) ([]ResolvedHop, error) {
 				return nil, errors.New("代理链不能重复使用同一个节点")
 			}
 			pinnedFixed[hop.NodeID] = true
+		} else if len(hop.Relay.NodeIDs) > 0 {
+			for _, nid := range hop.Relay.NodeIDs {
+				if nid == "" {
+					return nil, errors.New("中转节点列表包含空节点 ID")
+				}
+				if _, ok := s.Find(nid); !ok {
+					return nil, errors.New("中转组中的节点已被移除，请重新选择；原配置已保留")
+				}
+				if pinnedFixed[nid] {
+					return nil, errors.New("代理链不能重复使用同一个节点")
+				}
+				pinnedFixed[nid] = true
+			}
 		}
 	}
 
@@ -234,22 +253,25 @@ func (s Store) resolveHops(blocked map[string]string) ([]ResolvedHop, error) {
 				if !ok {
 					return nil, errors.New("中转组中的节点已被移除，请重新选择；原配置已保留")
 				}
-				if seenLocal[nid] || usedNodes[nid] {
+				if seenLocal[nid] {
 					return nil, errors.New("代理链不能重复使用同一个节点")
 				}
 				if blocked[nid] != "" {
 					return nil, fmt.Errorf("节点 %q 需要迁移：%w", n.Name, ErrLocalProxyNode)
 				}
 				seenLocal[nid] = true
-				usedNodes[nid] = true
 				members = append(members, nid)
 			}
 		}
 
+		groupName := RelayGroupName(i)
+		if i == len(s.RouteHops)-1 {
+			groupName = ExitGroupName
+		}
 		resolved = append(resolved, ResolvedHop{
 			Index:     i,
 			Relay:     &relayCopy,
-			GroupName: RelayGroupName(i),
+			GroupName: groupName,
 			Members:   members,
 		})
 	}
@@ -324,15 +346,28 @@ func allHopsFixed(hops []RouteHop) ([]string, bool) {
 }
 
 // SetRouteHops updates the store's Selected, Chain, and RouteHops fields
-// consistently for either fixed chains or chains containing relay pools,
+// consistently for either fixed chains or chains containing relay/exit pools,
 // and validates the resulting route against the current store.
 func (s *Store) SetRouteHops(hops []RouteHop) error {
 	if len(hops) == 0 {
 		return errors.New("请至少选择一个最终出口")
 	}
 	last := hops[len(hops)-1]
-	if last.Relay != nil || last.NodeID == "" {
-		return errors.New("最终出口必须是单个固定节点")
+	if last.NodeID == "" && last.Relay == nil {
+		return errors.New("请至少选择一个最终出口")
+	}
+	if last.Relay != nil {
+		if last.Relay.SourceID != "" {
+			return errors.New("最终出口故障转移仅支持手动指定节点列表，不能绑定整份订阅来源")
+		}
+		if len(last.Relay.NodeIDs) < 2 {
+			return errors.New("最终出口故障转移仅支持至少 2 个手动指定节点")
+		}
+		s.Selected = last.Relay.NodeIDs[0]
+		s.Chain = nil
+		s.RouteHops = cloneRouteHops(hops)
+		_, err := s.ResolveHops()
+		return err
 	}
 	if len(hops) == 1 {
 		s.Selected = last.NodeID

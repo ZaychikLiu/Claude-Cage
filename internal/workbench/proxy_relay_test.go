@@ -164,6 +164,43 @@ func TestProxyRelayRouteAPIValidationRefreshAndDelete(t *testing.T) {
 	}
 	failStart = false
 
+	// Multi-exit failover on final hop with SourceID relay on hop 0 works via API
+	// and blocks deleting sources referenced by exit failover members.
+	if err := applied.Import("exits2", "", []byte(`proxies:
+  - {name: exit-b, type: socks5, server: 192.0.2.21, port: 1080}
+`), "exits2", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	_ = applied.Save(s.profile)
+	exitBID := applied.Sources[len(applied.Sources)-1].Nodes[0].ID
+	if err := s.changeProxy("route", proxyInput{
+		Hops: []managedproxy.RouteHop{
+			{Relay: &managedproxy.RelayGroup{Strategy: managedproxy.RelayStrategyFallback, SourceID: "relays"}},
+			{Relay: &managedproxy.RelayGroup{Strategy: managedproxy.RelayStrategyFallback, NodeIDs: []string{exitID, exitBID}}},
+		},
+	}, nil); err != nil {
+		t.Fatalf("multi-exit failover route API failed: %v", err)
+	}
+	w2 := request(s, "GET", "/api/proxy", s.origin, "", true)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("GET /api/proxy failed: %d", w2.Code)
+	}
+	var view2 struct {
+		RouteHops []struct {
+			Group          string `json:"group"`
+			CandidateCount int    `json:"candidate_count"`
+		} `json:"route_hops"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &view2); err != nil || len(view2.RouteHops) != 2 {
+		t.Fatalf("expected 2 route_hops for dual failover, got err=%v body=%s", err, w2.Body.String())
+	}
+	if view2.RouteHops[0].Group != "CAGE-RELAY-0" || view2.RouteHops[1].Group != managedproxy.ExitGroupName || view2.RouteHops[1].CandidateCount != 2 {
+		t.Fatalf("unexpected dual failover groups: %+v", view2.RouteHops)
+	}
+	if err := s.changeProxy("delete", proxyInput{ID: "exits2"}, nil); err == nil {
+		t.Fatal("deleting source of exit failover member succeeded unexpectedly")
+	}
+
 	// select clears both Chain and RouteHops cleanly.
 	if err := s.changeProxy("select", proxyInput{NodeID: exitID}, nil); err != nil {
 		t.Fatal(err)

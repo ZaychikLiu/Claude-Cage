@@ -405,7 +405,10 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
     if (customIdx !== null) {
       const customHop = proxy.route_hops?.[customIdx];
       const count = customHop?.relay?.node_ids?.length || 0;
-      return tr("自定义中转组（{0} 个节点）", count);
+      const base = tr("自定义中转组（{0} 个节点）", count);
+      const activeID = !routeChanged && index >= 0 ? proxy.route_hops?.[index]?.active_node_id : "";
+      const activeNodeName = activeID && allNodes.find((n) => n.id === activeID)?.name;
+      return activeNodeName ? tr("{0}（当前：{1}）", base, activeNodeName) : base;
     }
     return allNodes.find((n) => n.id === id)?.name || "待选择";
   };
@@ -599,7 +602,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
                     ? tr("最终出口")
                     : route.length > 2 ? tr("中转节点 {0}", index + 1) : tr("中转节点");
                   const parsedRelay = !final ? parseRelayToken(id) : null;
-                  const customIdx = !final ? parseCustomRelayIndex(id) : null;
+                  const customIdx = parseCustomRelayIndex(id);
                   const usedOtherRelaySources = new Set(
                     route
                       .map((tok, i) => (i !== index ? parseRelayToken(tok)?.sourceID : null))
@@ -714,6 +717,17 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
                               : parsedRelay.strategy === "fallback"
                                 ? tr("中转不可用时按顺序自动故障转移，最终出口 IP 不变")
                                 : tr("自动选择延迟最低的中转节点，最终出口 IP 不变")}
+                          </small>
+                        )}
+                        {final && customIdx !== null && (
+                          <small>
+                            {(() => {
+                              const exitID = !routeChanged ? hopStatus?.active_node_id : "";
+                              const exitName = exitID && allNodes.find((n) => n.id === exitID)?.name;
+                              return exitName
+                                ? tr("自动切换当前中转：{0}（最终出口 IP 不变）", exitName)
+                                : tr("中转不可用时按顺序自动故障转移，最终出口 IP 不变");
+                            })()}
                           </small>
                         )}
                         {final && usableNodes.some((node) => node.id === id) && <small>{tr("目标网站看到此节点的出口 IP")}</small>}

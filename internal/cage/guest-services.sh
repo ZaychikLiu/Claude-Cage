@@ -151,3 +151,8 @@ if [ "${CAGE_WORKBENCH:-}" = 1 ]; then
 fi
 PROMPT
 fi
+
+sudo install -d -m 0755 /etc/ssh/sshd_config.d
+printf '%s\n' 'MaxSessions 128' | sudo tee /etc/ssh/sshd_config.d/20-cage-max-sessions.conf >/dev/null
+sudo chmod 0644 /etc/ssh/sshd_config.d/20-cage-max-sessions.conf
+sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true

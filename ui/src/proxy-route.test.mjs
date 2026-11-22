@@ -66,6 +66,31 @@ test("isRouteValid accepts relay sources with usable non-exit nodes and rejects 
   );
   // Source whose only node is chosen as the exit cannot serve as a relay hop.
   assert.equal(isRouteValid(["relay:fallback:src-single", "s1"], sources, usableNodes), false);
+  // Final hop with custom explicit NodeIDs is valid for multi-exit failover, while excluding duplicates.
+  assert.equal(
+    isRouteValid(
+      ["relay:fallback:src-relay", "relay-custom:1"],
+      sources,
+      usableNodes,
+      [
+        { relay: { strategy: "fallback", source_id: "src-relay" } },
+        { relay: { strategy: "fallback", node_ids: ["e1", "s1"] } },
+      ],
+    ),
+    true,
+  );
+  assert.equal(
+    isRouteValid(
+      ["r1", "relay-custom:1"],
+      sources,
+      usableNodes,
+      [
+        { node_id: "r1" },
+        { relay: { strategy: "fallback", node_ids: ["r1", "e1"] } },
+      ],
+    ),
+    false,
+  );
   // Relay candidates exclude fixed nodes in the route.
   assert.equal(relayCandidatesForSource(sources[0], usableNodes, new Set(["r1", "e1"])).map((n) => n.id).join(","), "r2");
 });
