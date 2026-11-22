@@ -28,6 +28,8 @@ func TestGuestServicesConfiguresSSHDLimits(t *testing.T) {
 
 func TestBrowserAgentWebGLAndGracefulShutdown(t *testing.T) {
 	for _, needle := range []string{
+		`"--use-gl=angle"`,
+		`"--use-angle=swiftshader"`,
 		`"--enable-unsafe-swiftshader"`,
 		`process.on("SIGTERM", shutdown)`,
 		`process.on("SIGINT", shutdown)`,

@@ -82,6 +82,8 @@ const flags = [
   "--no-default-browser-check",
   "--disable-quic",
   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+  "--use-gl=angle",
+  "--use-angle=swiftshader",
   "--enable-unsafe-swiftshader",
   "--disable-session-crashed-bubble",
   "--window-size=1440,900",
