@@ -104,6 +104,7 @@ LogNamespace=cage
 # Let the controller close Chromium and flush its tabs and profile before
 # systemd terminates any remaining child processes.
 KillMode=mixed
+TimeoutStopSec=15
 Restart=on-failure
 RestartSec=2
 UNIT

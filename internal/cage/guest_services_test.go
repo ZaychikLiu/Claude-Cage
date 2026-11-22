@@ -25,3 +25,19 @@ func TestGuestServicesConfiguresSSHDLimits(t *testing.T) {
 		t.Fatalf("expected socket drop-in before daemon-reload (dropin=%d, reload=%d)", socketDropin, daemonReload)
 	}
 }
+
+func TestBrowserAgentWebGLAndGracefulShutdown(t *testing.T) {
+	for _, needle := range []string{
+		`"--enable-unsafe-swiftshader"`,
+		`process.on("SIGTERM", shutdown)`,
+		`process.on("SIGINT", shutdown)`,
+		"8000",
+	} {
+		if !strings.Contains(browserAgent, needle) {
+			t.Fatalf("browserAgent missing %q", needle)
+		}
+	}
+	if !strings.Contains(guestServices, "TimeoutStopSec=15") {
+		t.Fatal("guestServices missing TimeoutStopSec=15 for cage-browser.service")
+	}
+}

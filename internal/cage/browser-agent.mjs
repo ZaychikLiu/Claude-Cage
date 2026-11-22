@@ -82,6 +82,7 @@ const flags = [
   "--no-default-browser-check",
   "--disable-quic",
   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+  "--enable-unsafe-swiftshader",
   "--disable-session-crashed-bubble",
   "--window-size=1440,900",
   ...(displaySettings.available ? [] : [`--force-device-scale-factor=${displayScale}`]),
@@ -1105,10 +1106,16 @@ server.listen(18500, "127.0.0.1");
   console.error("Browser startup failed:", error.message);
   process.exit(1);
 });
-process.on("SIGTERM", () => {
+const shutdown = () => {
+  if (shuttingDown) return;
   shuttingDown = true;
   server.close();
   void phoneBrowser?.dispose();
   void loginBrowser.shutdown().finally(() => cdp("Browser.close")).catch(() => {});
-  setTimeout(() => process.exit(0), 2000).unref();
-});
+  setTimeout(() => {
+    try { chrome.kill("SIGTERM"); } catch {}
+    setTimeout(() => process.exit(0), 1000).unref();
+  }, 8000);
+};
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
