@@ -2,6 +2,8 @@ package workbench
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,7 +100,7 @@ func TestGuestPluginFilesAreCopiedWhole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"HOME=" + home, "TZ=Europe/London"} {
+	for _, line := range []string{"HOME=" + home, "TZ=Europe/London", "npm_config_prefer_offline=true"} {
 		if !strings.Contains("\n"+string(output), "\n"+line+"\n") {
 			t.Fatalf("%s is missing from the program's environment:\n%s", line, output)
 		}
@@ -135,4 +137,68 @@ func TestGuestPluginFilesAreCopiedWhole(t *testing.T) {
 		_ = left.Process.Kill()
 		t.Fatal("the program left from before kept running")
 	}
+}
+
+func TestRunGuestSSHWithRetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh -c exit codes")
+	}
+	exitErr := func(code int) error {
+		return exec.Command("sh", "-c", "exit "+string(rune('0'+code))).Run()
+	}
+	exit255 := func() error {
+		return exec.Command("sh", "-c", "exit 255").Run()
+	}
+	delays := []time.Duration{5 * time.Millisecond, 10 * time.Millisecond}
+
+	t.Run("retries transient exit 255 twice then succeeds", func(t *testing.T) {
+		attempts := 0
+		out, err := runGuestSSHWithDelays(context.Background(), delays, func() ([]byte, error) {
+			attempts++
+			if attempts < 3 {
+				return []byte("retry"), exit255()
+			}
+			return []byte("ok"), nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if attempts != 3 || string(out) != "ok" {
+			t.Fatalf("got attempts=%d out=%q, want attempts=3 out=ok", attempts, out)
+		}
+	})
+
+	t.Run("does not retry non-255 exit", func(t *testing.T) {
+		attempts := 0
+		_, err := runGuestSSHWithDelays(context.Background(), delays, func() ([]byte, error) {
+			attempts++
+			return nil, exitErr(1)
+		})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if attempts != 1 {
+			t.Fatalf("got attempts=%d, want 1", attempts)
+		}
+	})
+
+	t.Run("aborts promptly on context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		attempts := 0
+		start := time.Now()
+		_, err := runGuestSSHWithDelays(ctx, []time.Duration{5 * time.Second}, func() ([]byte, error) {
+			attempts++
+			cancel()
+			return nil, exit255()
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got err=%v, want context.Canceled", err)
+		}
+		if attempts != 1 {
+			t.Fatalf("got attempts=%d, want 1", attempts)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("cancellation waited too long: %v", elapsed)
+		}
+	})
 }

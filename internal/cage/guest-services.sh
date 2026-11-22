@@ -141,6 +141,12 @@ ExecStart=/usr/local/bin/cage-log-run /usr/bin/websockify --web=/usr/local/share
 LogNamespace=cage
 Restart=on-failure
 UNIT
+# Debian 13 systemd-ssh-generator defaults sshd-vsock.socket to
+# PollLimitBurst=50/30s and MaxConnections=64, which throttles cold-boot
+# SSH bursts from project mounts and guest MCP plugins.
+sudo install -d -m 0755 /etc/systemd/system/sshd-vsock.socket.d /etc/systemd/system/sshd-unix-local.socket.d
+printf '%s\n' '[Socket]' 'PollLimitIntervalSec=0' 'PollLimitBurst=0' 'MaxConnections=512' | sudo tee /etc/systemd/system/sshd-vsock.socket.d/20-cage-limits.conf /etc/systemd/system/sshd-unix-local.socket.d/20-cage-limits.conf >/dev/null
+sudo chmod 0644 /etc/systemd/system/sshd-vsock.socket.d/20-cage-limits.conf /etc/systemd/system/sshd-unix-local.socket.d/20-cage-limits.conf
 sudo systemctl daemon-reload
 
 if ! grep -q 'CAGE_WORKBENCH_PROMPT' /home/cage/.bashrc; then

@@ -122,7 +122,7 @@ case "$program" in /*) ;; *) [ -f "./$program" ] && program="./$program" ;; esac
 set -- "$program" "$@"
 if [ "$settings" = 1 ] && [ -f "$dir.env" ]; then . "$dir.env"; fi
 rm -f "$dir.env"
-exec env -i HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="${SHELL:-/bin/sh}" PATH="$PATH" LANG="${LANG:-C.UTF-8}" ${LC_ALL:+LC_ALL="$LC_ALL"} ${TZ:+TZ="$TZ"} "$@"`
+exec env -i HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="${SHELL:-/bin/sh}" PATH="$PATH" LANG="${LANG:-C.UTF-8}" ${LC_ALL:+LC_ALL="$LC_ALL"} ${TZ:+TZ="$TZ"} npm_config_prefer_offline=true "$@"`
 
 // guestPluginSettingsScript writes, from its standard input, the file the
 // run script reads the settings from. Only the user can read it.
@@ -138,6 +138,36 @@ func guestPluginSettingsFile(env []string) string {
 		line += " " + shellQuote(entry)
 	}
 	return line + ` "$@"` + "\n"
+}
+
+var guestSSHRetryDelays = []time.Duration{500 * time.Millisecond, time.Second}
+
+func isTransientSSHExit(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 255
+}
+
+func runGuestSSHWithRetry(ctx context.Context, run func() ([]byte, error)) ([]byte, error) {
+	return runGuestSSHWithDelays(ctx, guestSSHRetryDelays, run)
+}
+
+func runGuestSSHWithDelays(ctx context.Context, delays []time.Duration, run func() ([]byte, error)) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		out, err := run()
+		if err == nil || !isTransientSSHExit(err) || attempt >= len(delays) {
+			return out, err
+		}
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+		timer := time.NewTimer(delays[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return out, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // guestPluginCommand copies the plugin's files into the environment, unless
@@ -162,20 +192,26 @@ func (s *Server) guestPluginCommand(ctx context.Context, manifest hostbridge.Man
 	folder := guestPluginRoot + "/" + manifest.Name
 	prepare, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	current, _ := s.sshCommand(prepare, "-T", s.sshTarget(), "--", "cat "+shellQuote(folder+"/.digest")+" 2>/dev/null").Output()
+	current, _ := runGuestSSHWithRetry(prepare, func() ([]byte, error) {
+		return s.sshCommand(prepare, "-T", s.sshTarget(), "--", "cat "+shellQuote(folder+"/.digest")+" 2>/dev/null").Output()
+	})
 	if strings.TrimSpace(string(current)) != digest {
-		sync := s.sshCommand(prepare, "-T", s.sshTarget(), "--", "sh -c "+shellQuote(guestPluginSyncScript)+" sh "+shellQuote(folder)+" "+shellQuote(digest))
-		sync.Stdin = bytes.NewReader(archive)
-		if output, err := sync.CombinedOutput(); err != nil {
+		if output, err := runGuestSSHWithRetry(prepare, func() ([]byte, error) {
+			sync := s.sshCommand(prepare, "-T", s.sshTarget(), "--", "sh -c "+shellQuote(guestPluginSyncScript)+" sh "+shellQuote(folder)+" "+shellQuote(digest))
+			sync.Stdin = bytes.NewReader(archive)
+			return sync.CombinedOutput()
+		}); err != nil {
 			return nil, fmt.Errorf("copying the plugin: %w: %s", err, strings.TrimSpace(string(output)))
 		}
 	}
 	settings := "0"
 	if len(env) > 0 {
-		write := s.sshCommand(prepare, "-T", s.sshTarget(), "--", "sh -c "+shellQuote(guestPluginSettingsScript)+" sh "+shellQuote(folder))
-		// Values travel on standard input, never on a command line.
-		write.Stdin = strings.NewReader(guestPluginSettingsFile(env))
-		if output, err := write.CombinedOutput(); err != nil {
+		if output, err := runGuestSSHWithRetry(prepare, func() ([]byte, error) {
+			write := s.sshCommand(prepare, "-T", s.sshTarget(), "--", "sh -c "+shellQuote(guestPluginSettingsScript)+" sh "+shellQuote(folder))
+			// Values travel on standard input, never on a command line.
+			write.Stdin = strings.NewReader(guestPluginSettingsFile(env))
+			return write.CombinedOutput()
+		}); err != nil {
 			return nil, fmt.Errorf("writing the plugin's settings: %w: %s", err, strings.TrimSpace(string(output)))
 		}
 		settings = "1"
